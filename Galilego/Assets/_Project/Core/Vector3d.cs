@@ -11,6 +11,7 @@ namespace Galilego.Physics
         public double Y;
         public double Z;
 
+        public bool IsFinite => IsFiniteComponent(X) && IsFiniteComponent(Y) && IsFiniteComponent(Z);
         public double SqrMagnitude => (X * X) + (Y * Y) + (Z * Z);
         public double Magnitude => Math.Sqrt(SqrMagnitude);
 
@@ -59,6 +60,11 @@ namespace Galilego.Physics
         public override string ToString()
         {
             return $"({X}, {Y}, {Z})";
+        }
+
+        private static bool IsFiniteComponent(double value)
+        {
+            return !double.IsNaN(value) && !double.IsInfinity(value);
         }
     }
 }

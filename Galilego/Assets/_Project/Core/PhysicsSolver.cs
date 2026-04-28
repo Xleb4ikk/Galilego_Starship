@@ -7,9 +7,30 @@ namespace Galilego.Physics
     {
         public const double GravitationalConstant = 6.67430e-11d;
 
+        public static double MassToStandardGravitationalParameter(double mass)
+        {
+            return GravitationalConstant * mass;
+        }
+
+        public static double StandardGravitationalParameterToMass(double standardGravitationalParameter)
+        {
+            return standardGravitationalParameter / GravitationalConstant;
+        }
+
         public static Vector3d CalculateAcceleration(Vector3d currentPos, Vector3d anchorPos, double anchorMass)
         {
-            if (anchorMass == 0d)
+            return CalculateAccelerationFromStandardGravitationalParameter(
+                currentPos,
+                anchorPos,
+                MassToStandardGravitationalParameter(anchorMass));
+        }
+
+        public static Vector3d CalculateAccelerationFromStandardGravitationalParameter(
+            Vector3d currentPos,
+            Vector3d anchorPos,
+            double standardGravitationalParameter)
+        {
+            if (standardGravitationalParameter == 0d)
             {
                 return Vector3d.Zero;
             }
@@ -24,7 +45,7 @@ namespace Galilego.Physics
 
             double inverseDistance = 1d / Math.Sqrt(sqrDistance);
             double inverseDistanceCubed = inverseDistance / sqrDistance;
-            double accelerationScale = GravitationalConstant * anchorMass * inverseDistanceCubed;
+            double accelerationScale = standardGravitationalParameter * inverseDistanceCubed;
 
             return offset * accelerationScale;
         }
@@ -47,7 +68,10 @@ namespace Galilego.Physics
                     continue;
                 }
 
-                totalAcceleration += CalculateAcceleration(currentPos, anchor.Position, anchor.Mass);
+                totalAcceleration += CalculateAccelerationFromStandardGravitationalParameter(
+                    currentPos,
+                    anchor.Position,
+                    anchor.StandardGravitationalParameter);
             }
 
             return totalAcceleration;
