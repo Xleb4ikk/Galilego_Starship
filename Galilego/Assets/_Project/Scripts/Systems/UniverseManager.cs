@@ -11,6 +11,7 @@ namespace Galilego.Physics
         [SerializeField] private Transform jupiterTransform;
         [SerializeField] private double jupiterMass = 1.89813e27d;
         [SerializeField] private double jupiterStandardGravitationalParameter = 1.266865319e17d;
+        [SerializeField] private double jupiterRadius = 6.9911e7d;
         [SerializeField] private Vector3d jupiterRealPosition = Vector3d.Zero;
 
         [Header("Ship")]
@@ -60,6 +61,7 @@ namespace Galilego.Physics
         private Transform moonOrbitRoot;
         private TrajectoryPredictor shipTrajectoryPredictor;
         private Material runtimeLineMaterial;
+        private bool rebuildRequested = false;
 
         public IReadOnlyList<CelestialBody> MoonBodies => moonBodies;
         public CelestialBody ShipBody => shipBody;
@@ -159,6 +161,92 @@ namespace Galilego.Physics
             return new Vector3((float)scaledOffset.X, (float)scaledOffset.Y, (float)scaledOffset.Z);
         }
 
+        private void ApplyVisualScale(Transform target, double realRadiusMeters)
+        {
+            if (target == null)
+            {
+                return;
+            }
+
+            if (realRadiusMeters <= 0d)
+            {
+                return;
+            }
+
+            double metersPerVisual = GetMetersPerVisualUnit();
+            if (metersPerVisual <= 0d)
+            {
+                return;
+            }
+
+            // Unity primitive sphere has radius 0.5 at localScale == 1, so we need diameter in units.
+            double desiredDiameterInUnits = (realRadiusMeters / metersPerVisual) * 2d;
+            if (double.IsNaN(desiredDiameterInUnits) || double.IsInfinity(desiredDiameterInUnits))
+            {
+                Debug.LogWarning($"UniverseManager: invalid scale computed for '{target.name}': {desiredDiameterInUnits}");
+                return;
+            }
+
+            float uniformScale = (float)desiredDiameterInUnits;
+
+            // Clamp to reasonable bounds to avoid disappearing or exploding objects at runtime.
+            const float minScale = 0.0001f;
+            const float maxScale = 10000f;
+            float clamped = Mathf.Clamp(uniformScale, minScale, maxScale);
+            if (!Mathf.Approximately(clamped, uniformScale))
+            {
+                Debug.LogWarning($"UniverseManager: clamped visual scale for '{target.name}' from {uniformScale} to {clamped}");
+            }
+
+            // Only set scale if target or its descendants contain a renderer; otherwise skip to avoid scaling empty parents.
+            bool hasRenderer = target.GetComponentInChildren<Renderer>(true) != null;
+            if (!hasRenderer)
+            {
+                Debug.LogWarning($"UniverseManager: skipped scaling '{target.name}' because no Renderer found in children.");
+                return;
+            }
+            // Prefer scaling based on the actual mesh bounds if available so arbitrary meshes scale correctly.
+            MeshFilter meshFilter = target.GetComponentInChildren<MeshFilter>(true);
+            if (meshFilter != null && meshFilter.sharedMesh != null)
+            {
+                Transform meshTransform = meshFilter.transform;
+                Bounds meshBounds = meshFilter.sharedMesh.bounds;
+                float meshRadiusLocal = Math.Max(meshBounds.extents.x, Math.Max(meshBounds.extents.y, meshBounds.extents.z));
+                if (meshRadiusLocal > 0f)
+                {
+                    // Current world radius = meshRadiusLocal * lossyScale
+                    Vector3 lossy = meshTransform.lossyScale;
+                    float currentWorldScale = Math.Max(lossy.x, Math.Max(lossy.y, lossy.z));
+                    float currentWorldRadius = meshRadiusLocal * currentWorldScale;
+
+                    double desiredWorldRadius = realRadiusMeters / metersPerVisual;
+                    if (currentWorldRadius <= 0f)
+                    {
+                        Debug.LogWarning($"UniverseManager: currentWorldRadius is zero for '{meshTransform.name}', skipping mesh-based scale.");
+                    }
+                    else
+                    {
+                        float scaleMultiplier = (float)(desiredWorldRadius / currentWorldRadius);
+                        float finalMultiplier = Mathf.Clamp(scaleMultiplier, minScale, maxScale);
+
+                        if (!Mathf.Approximately(finalMultiplier, scaleMultiplier))
+                        {
+                            Debug.LogWarning($"UniverseManager: clamped mesh-based multiplier for '{meshTransform.name}' from {scaleMultiplier} to {finalMultiplier}");
+                        }
+
+                        Vector3 newLocalScale = meshTransform.localScale * finalMultiplier;
+                        meshTransform.localScale = newLocalScale;
+                        Debug.Log($"UniverseManager: scaled mesh '{meshTransform.name}' to localScale={newLocalScale} (desiredWorldRadius={desiredWorldRadius})");
+                        return;
+                    }
+                }
+            }
+
+            // Fallback: assume model radius 0.5 at localScale == 1
+            target.localScale = new Vector3(clamped, clamped, clamped);
+            Debug.Log($"UniverseManager: scaled '{target.name}' fallback. uniformScale={clamped}");
+        }
+
         public Vector3d EvaluateShipAccelerationAt(Vector3d shipPosition, double sampleTimeSeconds)
         {
             EnsureInitialized();
@@ -250,23 +338,20 @@ namespace Galilego.Physics
                 jupiterStandardGravitationalParameter = PhysicsSolver.MassToStandardGravitationalParameter(jupiterMass);
             }
 
+            if (jupiterRadius <= 0d)
+            {
+                jupiterRadius = 6.9911e7d;
+            }
+
             for (int i = 0; i < moonRails.Count; i++)
             {
                 moonRails[i].ApplyPeriapsisAndApoapsis();
                 moonRails[i].SyncMassFromGravitationalParameter();
             }
 
-            if (Application.isPlaying)
-            {
-                EnsureTrajectoryVisuals();
-                SyncAllVisuals();
-                RebuildMoonOrbitLines();
-
-                if (shipTrajectoryPredictor != null)
-                {
-                    shipTrajectoryPredictor.ForceRefresh();
-                }
-            }
+            // Avoid creating GameObjects or calling SendMessage during OnValidate.
+            // Mark that an editor/runtime rebuild is required; actual visual creation will occur in Awake/Start.
+            rebuildRequested = true;
         }
 
         private void EnsureInitialized()
@@ -400,14 +485,39 @@ namespace Galilego.Physics
 
         private void SyncAllVisuals()
         {
+            // Ensure the runtime bodies are initialized and lists are in sync before applying visuals.
+            EnsureInitialized();
+
+            // Apply visual scale for Jupiter and moons based on real radii
+            ApplyVisualScale(jupiterTransform, jupiterRadius);
             ApplyVisualPosition(jupiterTransform, jupiterRealPosition);
 
-            for (int i = 0; i < moonRails.Count; i++)
+            int bodyCount = moonBodies != null ? moonBodies.Count : 0;
+            int railCount = moonRails != null ? moonRails.Count : 0;
+            int iterateCount = Math.Min(bodyCount, railCount);
+
+            for (int i = 0; i < iterateCount; i++)
             {
-                ApplyVisualPosition(moonRails[i].VisualTransform, moonBodies[i].Position);
+                MoonRail rail = moonRails[i];
+                if (rail == null)
+                {
+                    continue;
+                }
+
+                Transform visual = rail.VisualTransform;
+                if (visual == null)
+                {
+                    continue;
+                }
+
+                ApplyVisualScale(visual, rail.Radius);
+                ApplyVisualPosition(visual, moonBodies[i].Position);
             }
 
-            ApplyVisualPosition(ship.VisualTransform, shipBody.Position);
+            if (shipBody != null)
+            {
+                ApplyVisualPosition(ship.VisualTransform, shipBody.Position);
+            }
 
             if (moonOrbitRoot != null)
             {
