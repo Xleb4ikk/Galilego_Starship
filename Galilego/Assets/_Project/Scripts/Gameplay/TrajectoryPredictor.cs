@@ -86,6 +86,29 @@ namespace Galilego.Physics
             }
         }
 
+        public void Configure(UniverseManager manager, LineRenderer renderer)
+        {
+            universeManager = manager;
+            lineRenderer = renderer;
+            ConfigureLineRenderer();
+        }
+
+        public void ConfigurePrediction(
+            int steps,
+            double stepSeconds,
+            double maxSubstepSeconds,
+            bool shouldAutoRefresh,
+            float refreshInterval,
+            int batchSize)
+        {
+            predictionSteps = Math.Max(1, steps);
+            predictionStepSeconds = Math.Max(1e-6d, stepSeconds);
+            maxPredictionSubstepSeconds = Math.Max(0d, maxSubstepSeconds);
+            autoRefresh = shouldAutoRefresh;
+            refreshIntervalSeconds = Mathf.Max(0.01f, refreshInterval);
+            stepsPerBatch = Math.Max(1, batchSize);
+        }
+
         private IEnumerator RebuildTrajectoryCoroutine()
         {
             while (refreshQueued)
@@ -98,8 +121,8 @@ namespace Galilego.Physics
                     break;
                 }
 
-                Vector3 anchorPosition = universeManager.ToUnityPosition(startPosition);
-                transform.SetPositionAndRotation(anchorPosition, Quaternion.identity);
+                universeManager.ApplyVisualPosition(transform, startPosition);
+                transform.rotation = Quaternion.identity;
 
                 int clampedSteps = Math.Max(1, predictionSteps);
                 EnsurePointCapacity(clampedSteps + 1);
@@ -133,6 +156,13 @@ namespace Galilego.Physics
                         predictedPosition = stepResult.Position;
                         predictedVelocity = stepResult.Velocity;
                         predictedTimeSeconds += internalStepSeconds;
+
+                        if (!predictedPosition.IsFinite || !predictedVelocity.IsFinite)
+                        {
+                            ApplyLine(0);
+                            rebuildCoroutine = null;
+                            yield break;
+                        }
                     }
 
                     cachedLocalPoints[pointsWritten] = universeManager.ToUnityOffset(predictedPosition - startPosition);
