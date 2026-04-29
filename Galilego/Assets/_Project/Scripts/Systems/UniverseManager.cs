@@ -5,6 +5,21 @@ using UnityEngine.SceneManagement;
 
 namespace Galilego.Physics
 {
+    public enum ReferenceFrameTarget
+    {
+        Jupiter = 0,
+        Io = 1,
+        Europa = 2,
+        Ganymede = 3,
+        Callisto = 4
+    }
+
+    public enum AstrodynamicPlaneMapping
+    {
+        UnityXzPlaneYUp = 0,
+        UnityXyPlaneZUp = 1
+    }
+
     public sealed class UniverseManager : MonoBehaviour
     {
         [Header("Jupiter")]
@@ -33,6 +48,13 @@ namespace Galilego.Physics
         [SerializeField] private double metersPerUnityUnit = 100000d;
         [SerializeField] private double floatingOriginThreshold = 5000d;
 
+        [Header("Reference Frames")]
+        [SerializeField] private ReferenceFrameTarget selectedReferenceFrame = ReferenceFrameTarget.Jupiter;
+        [SerializeField] private AstrodynamicPlaneMapping astrodynamicPlaneMapping = AstrodynamicPlaneMapping.UnityXzPlaneYUp;
+        [SerializeField] private bool autoSelectSphereOfInfluence;
+        [SerializeField] private bool enableReferenceFrameHotkeys = true;
+        [SerializeField] private KeyCode cycleReferenceFrameKey = KeyCode.Tab;
+
         [Header("Trajectory Visuals")]
         [SerializeField] private bool showShipTrajectory = true;
         [SerializeField] private bool showMoonOrbits = true;
@@ -45,6 +67,10 @@ namespace Galilego.Physics
         [SerializeField] private float moonOrbitWidth = 0.08f;
         [SerializeField] private Color shipTrajectoryColor = new Color(0.25f, 0.95f, 1f, 0.95f);
         [SerializeField] private Color moonOrbitColor = new Color(0.65f, 0.85f, 1f, 0.4f);
+
+        [Header("Telemetry Overlay")]
+        [SerializeField] private bool showTelemetryOverlay = true;
+        [SerializeField] private Rect telemetryOverlayRect = new Rect(12f, 12f, 460f, 420f);
 
         [Header("Debug")]
         [SerializeField] private bool warnOnInvalidCoordinates = true;
@@ -61,7 +87,6 @@ namespace Galilego.Physics
         private Transform moonOrbitRoot;
         private TrajectoryPredictor shipTrajectoryPredictor;
         private Material runtimeLineMaterial;
-        private bool rebuildRequested = false;
 
         public IReadOnlyList<CelestialBody> MoonBodies => moonBodies;
         public CelestialBody ShipBody => shipBody;
@@ -69,6 +94,8 @@ namespace Galilego.Physics
         public double RecommendedSolverStepSeconds => maxSolverStepSeconds;
         public double MetersPerUnityUnit => GetMetersPerVisualUnit();
         public Vector3d FloatingOriginOffset => floatingOriginOffset;
+        public ReferenceFrameTarget SelectedReferenceFrame => selectedReferenceFrame;
+        public ReferenceFrameTarget ActiveReferenceFrame => ResolveActiveReferenceFrameTarget();
 
         private void Awake()
         {
@@ -100,6 +127,28 @@ namespace Galilego.Physics
 
             ApplyFloatingOriginIfNeeded();
             SyncAllVisuals();
+        }
+
+        private void Update()
+        {
+            if (enableReferenceFrameHotkeys && Input.GetKeyDown(cycleReferenceFrameKey))
+            {
+                CycleReferenceFrame();
+            }
+        }
+
+        private void OnGUI()
+        {
+            if (!showTelemetryOverlay)
+            {
+                return;
+            }
+
+            telemetryOverlayRect = GUILayout.Window(
+                913751,
+                telemetryOverlayRect,
+                DrawTelemetryWindow,
+                "Navigation Frame");
         }
 
         public void SyncVisualFromRealCoordinates()
@@ -159,6 +208,75 @@ namespace Galilego.Physics
         {
             Vector3d scaledOffset = realOffset / GetMetersPerVisualUnit();
             return new Vector3((float)scaledOffset.X, (float)scaledOffset.Y, (float)scaledOffset.Z);
+        }
+
+        public void SelectReferenceFrame(ReferenceFrameTarget target)
+        {
+            selectedReferenceFrame = target;
+            autoSelectSphereOfInfluence = false;
+        }
+
+        public void SetAutoSphereOfInfluenceSelection(bool enabled)
+        {
+            autoSelectSphereOfInfluence = enabled;
+        }
+
+        public void CycleReferenceFrame()
+        {
+            int next = ((int)selectedReferenceFrame + 1) % Enum.GetValues(typeof(ReferenceFrameTarget)).Length;
+            selectedReferenceFrame = (ReferenceFrameTarget)next;
+            autoSelectSphereOfInfluence = false;
+        }
+
+        public bool TryGetShipRelativeState(
+            ReferenceFrameTarget target,
+            out string frameName,
+            out Vector3d relativePosition,
+            out Vector3d relativeVelocity,
+            out double referenceStandardGravitationalParameter,
+            out double referenceRadius,
+            out double sphereOfInfluenceRadius)
+        {
+            EnsureInitialized();
+
+            relativePosition = Vector3d.Zero;
+            relativeVelocity = Vector3d.Zero;
+
+            if (!TryGetReferenceState(
+                target,
+                out frameName,
+                out Vector3d framePosition,
+                out Vector3d frameVelocity,
+                out referenceStandardGravitationalParameter,
+                out referenceRadius,
+                out sphereOfInfluenceRadius))
+            {
+                return false;
+            }
+
+            relativePosition = shipBody.Position - framePosition;
+            relativeVelocity = shipBody.Velocity - frameVelocity;
+            return true;
+        }
+
+        public OrbitalElements GetShipOrbitAround(ReferenceFrameTarget target)
+        {
+            if (!TryGetShipRelativeState(
+                target,
+                out _,
+                out Vector3d relativePosition,
+                out Vector3d relativeVelocity,
+                out double referenceStandardGravitationalParameter,
+                out _,
+                out _))
+            {
+                return OrbitalElements.Invalid;
+            }
+
+            return OrbitalElements.FromState(
+                ConvertSimulationToAstrodynamicFrame(relativePosition),
+                ConvertSimulationToAstrodynamicFrame(relativeVelocity),
+                referenceStandardGravitationalParameter);
         }
 
         private void ApplyVisualScale(Transform target, double realRadiusMeters)
@@ -266,6 +384,9 @@ namespace Galilego.Physics
             for (int i = 0; i < moonRails.Count; i++)
             {
                 MoonRail rail = moonRails[i];
+                rail.ApplyPeriapsisAndApoapsis();
+                rail.SyncMassFromGravitationalParameter();
+                rail.UpdateInfluenceRadii(ResolveJupiterMassForInfluence());
                 moonBodies.Add(new CelestialBody(
                     rail.Mass,
                     Vector3d.Zero,
@@ -347,11 +468,10 @@ namespace Galilego.Physics
             {
                 moonRails[i].ApplyPeriapsisAndApoapsis();
                 moonRails[i].SyncMassFromGravitationalParameter();
+                moonRails[i].UpdateInfluenceRadii(ResolveJupiterMassForInfluence());
             }
 
             // Avoid creating GameObjects or calling SendMessage during OnValidate.
-            // Mark that an editor/runtime rebuild is required; actual visual creation will occur in Awake/Start.
-            rebuildRequested = true;
         }
 
         private void EnsureInitialized()
@@ -406,8 +526,8 @@ namespace Galilego.Physics
                 velocityFactor * orbitalYScale * cosE,
                 0d);
 
-            position = jupiterRealPosition + RotateOrbitalToWorld(orbitalPosition, ascendingNode, inclination, periapsis);
-            velocity = RotateOrbitalToWorld(orbitalVelocity, ascendingNode, inclination, periapsis);
+            position = jupiterRealPosition + ConvertAstrodynamicToSimulationFrame(RotateOrbitalToWorld(orbitalPosition, ascendingNode, inclination, periapsis));
+            velocity = ConvertAstrodynamicToSimulationFrame(RotateOrbitalToWorld(orbitalVelocity, ascendingNode, inclination, periapsis));
         }
 
         private void StepSimulation(double dt)
@@ -444,6 +564,188 @@ namespace Galilego.Physics
             }
 
             return totalAcceleration;
+        }
+
+        private void DrawTelemetryWindow(int windowId)
+        {
+            ReferenceFrameTarget activeFrame = ResolveActiveReferenceFrameTarget();
+            autoSelectSphereOfInfluence = GUILayout.Toggle(autoSelectSphereOfInfluence, "Auto SOI frame");
+
+            GUILayout.BeginHorizontal();
+            DrawFrameButton(ReferenceFrameTarget.Jupiter);
+            DrawFrameButton(ReferenceFrameTarget.Io);
+            DrawFrameButton(ReferenceFrameTarget.Europa);
+            DrawFrameButton(ReferenceFrameTarget.Ganymede);
+            DrawFrameButton(ReferenceFrameTarget.Callisto);
+            GUILayout.EndHorizontal();
+
+            if (TryGetShipRelativeState(
+                activeFrame,
+                out string frameName,
+                out Vector3d relativePosition,
+                out Vector3d relativeVelocity,
+                out double frameMu,
+                out double frameRadius,
+                out double frameSoi))
+            {
+                double distance = relativePosition.Magnitude;
+                double speed = relativeVelocity.Magnitude;
+                double radialSpeed = distance > 0d ? Vector3d.Dot(relativePosition, relativeVelocity) / distance : 0d;
+                double tangentialSpeedSquared = Math.Max(0d, relativeVelocity.SqrMagnitude - (radialSpeed * radialSpeed));
+                double altitude = distance - frameRadius;
+
+                GUILayout.Label($"Frame: {frameName}  |  mu {FormatMu(frameMu)}");
+                GUILayout.Label($"r: {FormatDistance(distance)}  alt: {FormatDistance(altitude)}");
+                GUILayout.Label($"v: {FormatSpeed(speed)}  radial: {FormatSpeed(radialSpeed)}  tangential: {FormatSpeed(Math.Sqrt(tangentialSpeedSquared))}");
+                if (!double.IsInfinity(frameSoi) && frameSoi > 0d)
+                {
+                    GUILayout.Label($"SOI: {FormatDistance(frameSoi)}  fill: {Math.Min(999d, distance / frameSoi):0.000}");
+                }
+
+                OrbitalElements orbit = GetShipOrbitAround(activeFrame);
+                if (orbit.IsValid)
+                {
+                    GUILayout.Space(6f);
+                    GUILayout.Label("Ship orbit");
+                    GUILayout.Label($"a: {FormatDistance(orbit.SemiMajorAxis)}  e: {orbit.Eccentricity:0.000000}");
+                    GUILayout.Label($"Pe: {FormatDistance(orbit.PeriapsisDistance)}  Ap: {FormatDistance(orbit.ApoapsisDistance)}");
+                    GUILayout.Label($"Pe alt: {FormatDistance(orbit.PeriapsisDistance - frameRadius)}  Ap alt: {FormatDistance(orbit.ApoapsisDistance - frameRadius)}");
+                    GUILayout.Label($"i: {orbit.InclinationDegrees:0.000} deg  LAN: {orbit.LongitudeOfAscendingNodeDegrees:0.000} deg");
+                    GUILayout.Label($"arg Pe: {orbit.ArgumentOfPeriapsisDegrees:0.000} deg  true: {orbit.TrueAnomalyDegrees:0.000} deg");
+                    GUILayout.Label($"period: {FormatDuration(orbit.OrbitalPeriodSeconds)}  energy: {orbit.SpecificOrbitalEnergy:0.###} J/kg");
+                }
+            }
+
+            GUILayout.Space(6f);
+            GUILayout.Label("Relative ship state");
+            foreach (ReferenceFrameTarget target in Enum.GetValues(typeof(ReferenceFrameTarget)))
+            {
+                if (TryGetShipRelativeState(
+                    target,
+                    out string name,
+                    out Vector3d stateRelativePosition,
+                    out Vector3d stateRelativeVelocity,
+                    out _,
+                    out _,
+                    out _))
+                {
+                    GUILayout.Label($"{name}: r {FormatDistance(stateRelativePosition.Magnitude)}  v {FormatSpeed(stateRelativeVelocity.Magnitude)}");
+                }
+            }
+
+            GUI.DragWindow();
+        }
+
+        private void DrawFrameButton(ReferenceFrameTarget target)
+        {
+            string label = target == selectedReferenceFrame && !autoSelectSphereOfInfluence
+                ? $"[{target}]"
+                : target.ToString();
+
+            if (GUILayout.Button(label))
+            {
+                SelectReferenceFrame(target);
+            }
+        }
+
+        private ReferenceFrameTarget ResolveActiveReferenceFrameTarget()
+        {
+            if (!autoSelectSphereOfInfluence || shipBody == null)
+            {
+                return selectedReferenceFrame;
+            }
+
+            ReferenceFrameTarget nearestTarget = ReferenceFrameTarget.Jupiter;
+            double nearestDistance = double.PositiveInfinity;
+
+            foreach (ReferenceFrameTarget target in Enum.GetValues(typeof(ReferenceFrameTarget)))
+            {
+                if (target == ReferenceFrameTarget.Jupiter)
+                {
+                    continue;
+                }
+
+                if (!TryGetShipRelativeState(
+                    target,
+                    out _,
+                    out Vector3d relativePosition,
+                    out _,
+                    out _,
+                    out _,
+                    out double soiRadius))
+                {
+                    continue;
+                }
+
+                double distance = relativePosition.Magnitude;
+                if (soiRadius > 0d && distance <= soiRadius && distance < nearestDistance)
+                {
+                    nearestDistance = distance;
+                    nearestTarget = target;
+                }
+            }
+
+            return nearestTarget;
+        }
+
+        private bool TryGetReferenceState(
+            ReferenceFrameTarget target,
+            out string frameName,
+            out Vector3d framePosition,
+            out Vector3d frameVelocity,
+            out double frameStandardGravitationalParameter,
+            out double frameRadius,
+            out double sphereOfInfluenceRadius)
+        {
+            frameName = target.ToString();
+            framePosition = Vector3d.Zero;
+            frameVelocity = Vector3d.Zero;
+            frameStandardGravitationalParameter = 0d;
+            frameRadius = 0d;
+            sphereOfInfluenceRadius = 0d;
+
+            if (target == ReferenceFrameTarget.Jupiter)
+            {
+                frameName = "Jupiter";
+                framePosition = jupiterRealPosition;
+                frameVelocity = Vector3d.Zero;
+                frameStandardGravitationalParameter = jupiterStandardGravitationalParameter;
+                frameRadius = jupiterRadius;
+                sphereOfInfluenceRadius = double.PositiveInfinity;
+                return true;
+            }
+
+            int moonIndex = FindMoonIndex(target);
+            if (moonIndex < 0 || moonIndex >= moonBodies.Count || moonIndex >= moonRails.Count)
+            {
+                return false;
+            }
+
+            MoonRail rail = moonRails[moonIndex];
+            CelestialBody moonBody = moonBodies[moonIndex];
+            frameName = string.IsNullOrWhiteSpace(rail.Name) ? target.ToString() : rail.Name;
+            framePosition = moonBody.Position;
+            frameVelocity = moonBody.Velocity;
+            frameStandardGravitationalParameter = rail.ResolveStandardGravitationalParameter();
+            frameRadius = rail.Radius;
+            sphereOfInfluenceRadius = rail.SphereOfInfluenceRadius;
+            return true;
+        }
+
+        private int FindMoonIndex(ReferenceFrameTarget target)
+        {
+            string targetName = target.ToString();
+            for (int i = 0; i < moonRails.Count; i++)
+            {
+                MoonRail rail = moonRails[i];
+                if (rail != null && string.Equals(rail.Name, targetName, StringComparison.OrdinalIgnoreCase))
+                {
+                    return i;
+                }
+            }
+
+            int fallbackIndex = ((int)target) - 1;
+            return fallbackIndex >= 0 && fallbackIndex < moonRails.Count ? fallbackIndex : -1;
         }
 
         [ContextMenu("Load JPL Galilean Moon Rails")]
@@ -634,6 +936,13 @@ namespace Galilego.Physics
             return GetUnityScale() / distanceMultiplier;
         }
 
+        private double ResolveJupiterMassForInfluence()
+        {
+            return jupiterStandardGravitationalParameter > 0d
+                ? PhysicsSolver.StandardGravitationalParameterToMass(jupiterStandardGravitationalParameter)
+                : jupiterMass;
+        }
+
         private void ShiftLoadedSceneRoots(Vector3 visualShift)
         {
             if (worldContainer != null)
@@ -656,6 +965,115 @@ namespace Galilego.Physics
                     rootObjects[rootIndex].transform.position -= visualShift;
                 }
             }
+        }
+
+        private Vector3d ConvertAstrodynamicToSimulationFrame(Vector3d vector)
+        {
+            switch (astrodynamicPlaneMapping)
+            {
+                case AstrodynamicPlaneMapping.UnityXyPlaneZUp:
+                    return vector;
+                case AstrodynamicPlaneMapping.UnityXzPlaneYUp:
+                default:
+                    return new Vector3d(vector.X, vector.Z, vector.Y);
+            }
+        }
+
+        private Vector3d ConvertSimulationToAstrodynamicFrame(Vector3d vector)
+        {
+            switch (astrodynamicPlaneMapping)
+            {
+                case AstrodynamicPlaneMapping.UnityXyPlaneZUp:
+                    return vector;
+                case AstrodynamicPlaneMapping.UnityXzPlaneYUp:
+                default:
+                    return new Vector3d(vector.X, vector.Z, vector.Y);
+            }
+        }
+
+        private static string FormatDistance(double meters)
+        {
+            if (double.IsInfinity(meters))
+            {
+                return "inf";
+            }
+
+            if (double.IsNaN(meters))
+            {
+                return "n/a";
+            }
+
+            double absolute = Math.Abs(meters);
+            if (absolute >= 1e9d)
+            {
+                return $"{meters / 1e9d:0.###} Gm";
+            }
+
+            if (absolute >= 1e6d)
+            {
+                return $"{meters / 1e6d:0.###} Mm";
+            }
+
+            if (absolute >= 1e3d)
+            {
+                return $"{meters / 1e3d:0.###} km";
+            }
+
+            return $"{meters:0.###} m";
+        }
+
+        private static string FormatSpeed(double metersPerSecond)
+        {
+            if (double.IsNaN(metersPerSecond))
+            {
+                return "n/a";
+            }
+
+            double absolute = Math.Abs(metersPerSecond);
+            if (absolute >= 1e3d)
+            {
+                return $"{metersPerSecond / 1e3d:0.###} km/s";
+            }
+
+            return $"{metersPerSecond:0.###} m/s";
+        }
+
+        private static string FormatMu(double standardGravitationalParameter)
+        {
+            return $"{standardGravitationalParameter:0.###e+0} m3/s2";
+        }
+
+        private static string FormatDuration(double seconds)
+        {
+            if (double.IsInfinity(seconds))
+            {
+                return "open";
+            }
+
+            if (double.IsNaN(seconds) || seconds < 0d)
+            {
+                return "n/a";
+            }
+
+            double days = seconds / 86400d;
+            if (days >= 1d)
+            {
+                return $"{days:0.###} d";
+            }
+
+            double hours = seconds / 3600d;
+            if (hours >= 1d)
+            {
+                return $"{hours:0.###} h";
+            }
+
+            double minutes = seconds / 60d;
+            if (minutes >= 1d)
+            {
+                return $"{minutes:0.###} min";
+            }
+
+            return $"{seconds:0.###} s";
         }
 
         private void WarnInvalidCoordinates(string targetName, Vector3d coordinates)
