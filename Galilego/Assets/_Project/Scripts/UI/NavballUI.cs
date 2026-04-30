@@ -10,6 +10,9 @@ namespace Galilego.Physics
         [SerializeField] private UniverseManager universeManager;
         [SerializeField] private Transform shipOrientation;
         [SerializeField] private RectTransform ball;
+        [SerializeField] private RawImage ballImage;
+        [SerializeField] private NavballSphereGraphic ballSphere;
+        [SerializeField] private NavballFrameGraphic frameGraphic;
         [SerializeField] private TMP_Text frameLabel;
 
         [Header("Markers")]
@@ -29,6 +32,8 @@ namespace Galilego.Physics
         [SerializeField] private bool hideBacksideMarkers = true;
         [SerializeField] private float backsideScale = 0.65f;
         [SerializeField] private float minimumDirectionMagnitude = 1e-4f;
+        [SerializeField] private bool driveBallTexture = true;
+        [SerializeField] private Vector2 ballUvSize = new Vector2(0.42f, 0.42f);
 
         private void Update()
         {
@@ -66,6 +71,8 @@ namespace Galilego.Physics
             Vector3 localNorth = ResolveLocalNorth(radialOut);
             Vector3 localEast = Vector3.Cross(radialOut, localNorth).normalized;
 
+            UpdateBall(radialOut, localNorth, localEast);
+
             SetMarker(progradeMarker, velocity);
             SetMarker(retrogradeMarker, -velocity);
             SetMarker(radialOutMarker, radialOut);
@@ -77,7 +84,7 @@ namespace Galilego.Physics
             SetMarker(eastMarker, localEast);
             SetMarker(westMarker, -localEast);
 
-            if (ball != null)
+            if (ball != null && ballSphere == null)
             {
                 Vector3 localNorthOnBall = shipOrientation.InverseTransformDirection(localNorth);
                 float northAngle = Mathf.Atan2(localNorthOnBall.y, localNorthOnBall.x) * Mathf.Rad2Deg;
@@ -105,6 +112,69 @@ namespace Galilego.Physics
             }
 
             return localNorth.sqrMagnitude > 0f ? localNorth.normalized : Vector3.up;
+        }
+
+        private void UpdateBall(Vector3 radialOut, Vector3 localNorth, Vector3 localEast)
+        {
+            if (ballSphere != null)
+            {
+                UpdateBallSphere(radialOut, localNorth, localEast);
+                if (ball != null)
+                {
+                    ball.localRotation = Quaternion.identity;
+                }
+
+                return;
+            }
+
+            UpdateBallTexture(radialOut, localNorth, localEast);
+        }
+
+        private void UpdateBallSphere(Vector3 radialOut, Vector3 localNorth, Vector3 localEast)
+        {
+            if (!driveBallTexture || ballSphere == null || shipOrientation == null)
+            {
+                return;
+            }
+
+            if (!IsUsableDirection(radialOut) || !IsUsableDirection(localNorth) || !IsUsableDirection(localEast))
+            {
+                return;
+            }
+
+            ballSphere.SetReferenceBasis(
+                shipOrientation.InverseTransformDirection(radialOut.normalized),
+                shipOrientation.InverseTransformDirection(localNorth.normalized),
+                shipOrientation.InverseTransformDirection(localEast.normalized));
+        }
+
+        private void UpdateBallTexture(Vector3 radialOut, Vector3 localNorth, Vector3 localEast)
+        {
+            if (!driveBallTexture || ballImage == null || shipOrientation == null)
+            {
+                return;
+            }
+
+            if (!IsUsableDirection(radialOut) || !IsUsableDirection(localNorth) || !IsUsableDirection(localEast))
+            {
+                return;
+            }
+
+            Vector3 forward = shipOrientation.forward.normalized;
+            float headingRadians = Mathf.Atan2(Vector3.Dot(forward, localEast), Vector3.Dot(forward, localNorth));
+            float pitchRadians = Mathf.Asin(Mathf.Clamp(Vector3.Dot(forward, radialOut), -1f, 1f));
+
+            float width = Mathf.Clamp(ballUvSize.x, 0.05f, 1f);
+            float height = Mathf.Clamp(ballUvSize.y, 0.05f, 1f);
+            float centerU = Mathf.Repeat(0.5f + (headingRadians / (Mathf.PI * 2f)), 1f);
+            float centerV = Mathf.Clamp01(0.5f + (pitchRadians / Mathf.PI));
+
+            ballImage.uvRect = new Rect(centerU - (width * 0.5f), centerV - (height * 0.5f), width, height);
+        }
+
+        private bool IsUsableDirection(Vector3 direction)
+        {
+            return direction.sqrMagnitude > minimumDirectionMagnitude * minimumDirectionMagnitude;
         }
 
         private Vector3 ToUnityDirection(Vector3d direction)
@@ -180,6 +250,26 @@ namespace Galilego.Physics
             if (shipOrientation == null && universeManager != null)
             {
                 shipOrientation = universeManager.ShipVisualTransform;
+            }
+
+            if (ballImage == null)
+            {
+                ballImage = ballSphere != null ? ballSphere : GetComponentInChildren<RawImage>(true);
+            }
+
+            if (ball == null && ballImage != null)
+            {
+                ball = ballImage.rectTransform;
+            }
+
+            if (ballSphere == null)
+            {
+                ballSphere = GetComponentInChildren<NavballSphereGraphic>(true);
+            }
+
+            if (frameGraphic == null)
+            {
+                frameGraphic = GetComponentInChildren<NavballFrameGraphic>(true);
             }
         }
     }

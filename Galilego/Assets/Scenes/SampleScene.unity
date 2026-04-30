@@ -988,6 +988,7 @@ GameObject:
   - component: {fileID: 399549109}
   - component: {fileID: 399549111}
   - component: {fileID: 399549110}
+  - component: {fileID: 399549112}
   m_Layer: 5
   m_Name: NavballPanel
   m_TagString: Untagged
@@ -1004,15 +1005,17 @@ RectTransform:
   m_GameObject: {fileID: 399549108}
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
   m_LocalPosition: {x: 0, y: 0, z: 0}
-  m_LocalScale: {x: 0.13, y: 0.14, z: 1}
+  m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
-  m_Children: []
+  m_Children:
+  - {fileID: 399549121}
+  - {fileID: 399549131}
   m_Father: {fileID: 1773954469}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
-  m_AnchorMin: {x: 0, y: 0}
-  m_AnchorMax: {x: 1, y: 1}
-  m_AnchoredPosition: {x: 0, y: -446}
-  m_SizeDelta: {x: 0, y: 0}
+  m_AnchorMin: {x: 1, y: 0}
+  m_AnchorMax: {x: 1, y: 0}
+  m_AnchoredPosition: {x: -132, y: 132}
+  m_SizeDelta: {x: 230, y: 230}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!114 &399549110
 MonoBehaviour:
@@ -1027,8 +1030,8 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: UnityEngine.UI::UnityEngine.UI.Image
   m_Material: {fileID: 0}
-  m_Color: {r: 1, g: 1, b: 1, a: 0.392}
-  m_RaycastTarget: 1
+  m_Color: {r: 1, g: 1, b: 1, a: 0}
+  m_RaycastTarget: 0
   m_RaycastPadding: {x: 0, y: 0, z: 0, w: 0}
   m_Maskable: 1
   m_OnCullStateChanged:
@@ -1052,6 +1055,197 @@ CanvasRenderer:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 399549108}
   m_CullTransparentMesh: 1
+--- !u!114 &399549112
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 399549108}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 731fd09ce44840579597f4419d52b572, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::Galilego.Physics.NavballUI
+  universeManager: {fileID: 1581560978}
+  shipOrientation: {fileID: 1390413973}
+  ball: {fileID: 399549121}
+  ballImage: {fileID: 399549123}
+  ballSphere: {fileID: 399549123}
+  frameGraphic: {fileID: 399549133}
+  frameLabel: {fileID: 0}
+  progradeMarker: {fileID: 0}
+  retrogradeMarker: {fileID: 0}
+  radialOutMarker: {fileID: 0}
+  radialInMarker: {fileID: 0}
+  normalMarker: {fileID: 0}
+  antiNormalMarker: {fileID: 0}
+  northMarker: {fileID: 0}
+  eastMarker: {fileID: 0}
+  southMarker: {fileID: 0}
+  westMarker: {fileID: 0}
+  markerRadius: 82
+  hideBacksideMarkers: 1
+  backsideScale: 0.65
+  minimumDirectionMagnitude: 0.0001
+  driveBallTexture: 1
+  ballUvSize: {x: 0.42, y: 0.42}
+--- !u!1 &399549120
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 399549121}
+  - component: {fileID: 399549122}
+  - component: {fileID: 399549123}
+  m_Layer: 5
+  m_Name: NavballBall
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!224 &399549121
+RectTransform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 399549120}
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 399549109}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+  m_AnchorMin: {x: 0.5, y: 0.5}
+  m_AnchorMax: {x: 0.5, y: 0.5}
+  m_AnchoredPosition: {x: 0, y: 0}
+  m_SizeDelta: {x: 210, y: 210}
+  m_Pivot: {x: 0.5, y: 0.5}
+--- !u!222 &399549122
+CanvasRenderer:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 399549120}
+  m_CullTransparentMesh: 1
+--- !u!114 &399549123
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 399549120}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 0e8676f9bead4bc09f1e4bc0d0ac25d1, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::Galilego.Physics.NavballSphereGraphic
+  m_Material: {fileID: 0}
+  m_Color: {r: 1, g: 1, b: 1, a: 1}
+  m_RaycastTarget: 0
+  m_RaycastPadding: {x: 0, y: 0, z: 0, w: 0}
+  m_Maskable: 1
+  m_OnCullStateChanged:
+    m_PersistentCalls:
+      m_Calls: []
+  m_Texture: {fileID: 2800000, guid: ce011637bdf4c5f4196adafd7925b207, type: 3}
+  m_UVRect:
+    serializedVersion: 2
+    x: 0
+    y: 0
+    width: 1
+    height: 1
+  rings: 56
+  segments: 144
+  sphereFill: 0.93
+  edgeBrightness: 0.56
+  centerBrightness: 1.08
+  limbPower: 0.55
+  lightDirection: {x: -0.35, y: 0.45, z: 0.82}
+  lightStrength: 0.12
+  radialOutInShip: {x: 0, y: 1, z: 0}
+  northInShip: {x: 0, y: 0, z: 1}
+  eastInShip: {x: 1, y: 0, z: 0}
+--- !u!1 &399549130
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 399549131}
+  - component: {fileID: 399549132}
+  - component: {fileID: 399549133}
+  m_Layer: 5
+  m_Name: NavballFrame
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!224 &399549131
+RectTransform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 399549130}
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 399549109}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+  m_AnchorMin: {x: 0.5, y: 0.5}
+  m_AnchorMax: {x: 0.5, y: 0.5}
+  m_AnchoredPosition: {x: 0, y: 0}
+  m_SizeDelta: {x: 230, y: 230}
+  m_Pivot: {x: 0.5, y: 0.5}
+--- !u!222 &399549132
+CanvasRenderer:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 399549130}
+  m_CullTransparentMesh: 1
+--- !u!114 &399549133
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 399549130}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: f02f775b981e482bb6dd79175299cd2f, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::Galilego.Physics.NavballFrameGraphic
+  m_Material: {fileID: 0}
+  m_Color: {r: 1, g: 1, b: 1, a: 1}
+  m_RaycastTarget: 0
+  m_RaycastPadding: {x: 0, y: 0, z: 0, w: 0}
+  m_Maskable: 1
+  m_OnCullStateChanged:
+    m_PersistentCalls:
+      m_Calls: []
+  segments: 160
+  innerRadius: 0.425
+  outerRadius: 0.5
+  outerShadow: {r: 0.13, g: 0.13, b: 0.13, a: 0.95}
+  outerHighlight: {r: 0.72, g: 0.72, b: 0.68, a: 1}
+  innerBezel: {r: 0.42, g: 0.42, b: 0.4, a: 1}
+  innerShadow: {r: 0.06, g: 0.06, b: 0.06, a: 0.95}
+  markerColor: {r: 0.88, g: 0.88, b: 0.82, a: 1}
 --- !u!1 &410087039
 GameObject:
   m_ObjectHideFlags: 0
