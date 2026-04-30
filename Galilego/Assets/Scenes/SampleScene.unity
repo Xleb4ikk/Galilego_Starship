@@ -1068,7 +1068,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::Galilego.Physics.NavballUI
   universeManager: {fileID: 1581560978}
-  shipOrientation: {fileID: 1390413973}
+  shipOrientation: {fileID: 1390413975}
   ball: {fileID: 399549121}
   ballImage: {fileID: 399549123}
   ballSphere: {fileID: 399549123}
@@ -1089,6 +1089,10 @@ MonoBehaviour:
   backsideScale: 0.65
   minimumDirectionMagnitude: 0.0001
   driveBallTexture: 1
+  alignToOrbitalFrame: 0
+  shipLocalForward: {x: 0, y: 1, z: 0}
+  shipLocalUp: {x: 0, y: 0, z: 1}
+  flipBallVertical: 1
   ballUvSize: {x: 0.42, y: 0.42}
 --- !u!1 &399549120
 GameObject:

@@ -5,6 +5,8 @@ namespace Galilego.Physics
 {
     public sealed class NavballSphereGraphic : RawImage
     {
+        private const float BasisChangeEpsilon = 1e-10f;
+
         [SerializeField, Range(12, 96)] private int rings = 56;
         [SerializeField, Range(48, 192)] private int segments = 144;
         [SerializeField, Range(0.75f, 1f)] private float sphereFill = 0.93f;
@@ -27,9 +29,9 @@ namespace Galilego.Physics
                 return;
             }
 
-            if ((radialOutInShip - radialOut).sqrMagnitude < 0.000001f &&
-                (northInShip - north).sqrMagnitude < 0.000001f &&
-                (eastInShip - east).sqrMagnitude < 0.000001f)
+            if ((radialOutInShip - radialOut).sqrMagnitude < BasisChangeEpsilon &&
+                (northInShip - north).sqrMagnitude < BasisChangeEpsilon &&
+                (eastInShip - east).sqrMagnitude < BasisChangeEpsilon)
             {
                 return;
             }

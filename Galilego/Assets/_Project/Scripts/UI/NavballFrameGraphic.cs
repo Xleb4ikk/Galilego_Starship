@@ -19,22 +19,22 @@ namespace Galilego.Physics
             vh.Clear();
 
             Rect rect = GetPixelAdjustedRect();
-            float radius = Mathf.Min(rect.width, rect.height) * 0.5f;
-            if (radius <= 0f)
+            float radiusScale = Mathf.Min(rect.width, rect.height);
+            if (radiusScale <= 0f)
             {
                 return;
             }
 
             Vector2 center = rect.center;
-            float inner = radius * innerRadius;
-            float outer = radius * outerRadius;
+            float inner = radiusScale * innerRadius;
+            float outer = radiusScale * outerRadius;
 
             AddRing(vh, center, inner, outer, innerBezel, outerHighlight);
             AddRing(vh, center, inner * 0.965f, inner * 1.03f, innerShadow, innerBezel);
             AddRing(vh, center, outer * 0.985f, outer * 1.015f, outerHighlight, outerShadow);
-            AddTopIndex(vh, center, radius);
-            AddSideGrip(vh, center, radius, -1f);
-            AddSideGrip(vh, center, radius, 1f);
+            AddTopIndex(vh, center, radiusScale);
+            AddSideGrip(vh, center, radiusScale, -1f);
+            AddSideGrip(vh, center, radiusScale, 1f);
         }
 
         private void AddRing(VertexHelper vh, Vector2 center, float inner, float outer, Color innerColor, Color outerColor)
