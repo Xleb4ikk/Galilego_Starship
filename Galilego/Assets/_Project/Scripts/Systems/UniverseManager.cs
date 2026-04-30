@@ -85,23 +85,32 @@ namespace Galilego.Physics
         private Vector3d floatingOriginOffset = Vector3d.Zero;
         private Transform trajectoryVisualRoot;
         private Transform moonOrbitRoot;
+        private LineRenderer jupiterOrbitRenderer;
         private TrajectoryPredictor shipTrajectoryPredictor;
         private Material runtimeLineMaterial;
+        private ReferenceFrameTarget lastActiveReferenceFrame = ReferenceFrameTarget.Jupiter;
+
+        public event Action<ReferenceFrameTarget> ActiveReferenceFrameChanged;
 
         public IReadOnlyList<CelestialBody> MoonBodies => moonBodies;
         public CelestialBody ShipBody => shipBody;
+        public Transform ShipVisualTransform => ship != null ? ship.VisualTransform : null;
         public double SimulationTimeSeconds => simulationTimeSeconds;
         public double RecommendedSolverStepSeconds => maxSolverStepSeconds;
         public double MetersPerUnityUnit => GetMetersPerVisualUnit();
         public Vector3d FloatingOriginOffset => floatingOriginOffset;
         public ReferenceFrameTarget SelectedReferenceFrame => selectedReferenceFrame;
         public ReferenceFrameTarget ActiveReferenceFrame => ResolveActiveReferenceFrameTarget();
+        public bool IsAutoSphereOfInfluenceSelectionEnabled => autoSelectSphereOfInfluence;
+        public Vector3 AstrodynamicNorthUnityDirection => ToUnityDirection(ConvertAstrodynamicToSimulationFrame(new Vector3d(0d, 0d, 1d)));
+        public Vector3 AstrodynamicEastUnityDirection => ToUnityDirection(ConvertAstrodynamicToSimulationFrame(new Vector3d(1d, 0d, 0d)));
 
         private void Awake()
         {
             InitializeBodies();
             SyncAllVisuals();
             EnsureTrajectoryVisuals();
+            lastActiveReferenceFrame = ResolveActiveReferenceFrameTarget();
         }
 
         private void Reset()
@@ -135,6 +144,8 @@ namespace Galilego.Physics
             {
                 CycleReferenceFrame();
             }
+
+            RefreshReferenceFrameChange();
         }
 
         private void OnGUI()
@@ -210,22 +221,54 @@ namespace Galilego.Physics
             return new Vector3((float)scaledOffset.X, (float)scaledOffset.Y, (float)scaledOffset.Z);
         }
 
+        public Vector3 ToUnityDirection(Vector3d realDirection)
+        {
+            if (!realDirection.IsFinite || realDirection.SqrMagnitude <= 0d)
+            {
+                return Vector3.zero;
+            }
+
+            Vector3 direction = new Vector3((float)realDirection.X, (float)realDirection.Y, (float)realDirection.Z);
+            return direction.sqrMagnitude > 0f ? direction.normalized : Vector3.zero;
+        }
+
         public void SelectReferenceFrame(ReferenceFrameTarget target)
         {
+            bool changed = selectedReferenceFrame != target || autoSelectSphereOfInfluence;
             selectedReferenceFrame = target;
             autoSelectSphereOfInfluence = false;
+
+            if (changed)
+            {
+                NotifyReferenceFrameStateChanged();
+            }
+        }
+
+        public void SelectReferenceFrame(int targetIndex)
+        {
+            if (!Enum.IsDefined(typeof(ReferenceFrameTarget), targetIndex))
+            {
+                return;
+            }
+
+            SelectReferenceFrame((ReferenceFrameTarget)targetIndex);
         }
 
         public void SetAutoSphereOfInfluenceSelection(bool enabled)
         {
+            bool changed = autoSelectSphereOfInfluence != enabled;
             autoSelectSphereOfInfluence = enabled;
+
+            if (changed)
+            {
+                NotifyReferenceFrameStateChanged();
+            }
         }
 
         public void CycleReferenceFrame()
         {
             int next = ((int)selectedReferenceFrame + 1) % Enum.GetValues(typeof(ReferenceFrameTarget)).Length;
-            selectedReferenceFrame = (ReferenceFrameTarget)next;
-            autoSelectSphereOfInfluence = false;
+            SelectReferenceFrame((ReferenceFrameTarget)next);
         }
 
         public bool TryGetShipRelativeState(
@@ -648,6 +691,36 @@ namespace Galilego.Physics
             }
         }
 
+        private void RefreshReferenceFrameChange()
+        {
+            ReferenceFrameTarget activeFrame = ResolveActiveReferenceFrameTarget();
+            if (activeFrame == lastActiveReferenceFrame)
+            {
+                return;
+            }
+
+            lastActiveReferenceFrame = activeFrame;
+            RebuildReferenceFrameVisuals();
+            ActiveReferenceFrameChanged?.Invoke(activeFrame);
+        }
+
+        private void NotifyReferenceFrameStateChanged()
+        {
+            lastActiveReferenceFrame = ResolveActiveReferenceFrameTarget();
+            RebuildReferenceFrameVisuals();
+            ActiveReferenceFrameChanged?.Invoke(lastActiveReferenceFrame);
+        }
+
+        private void RebuildReferenceFrameVisuals()
+        {
+            RebuildMoonOrbitLines();
+
+            if (shipTrajectoryPredictor != null)
+            {
+                shipTrajectoryPredictor.ForceRefresh();
+            }
+        }
+
         private ReferenceFrameTarget ResolveActiveReferenceFrameTarget()
         {
             if (!autoSelectSphereOfInfluence || shipBody == null)
@@ -688,8 +761,54 @@ namespace Galilego.Physics
             return nearestTarget;
         }
 
-        private bool TryGetReferenceState(
+        public bool TryGetReferenceState(
             ReferenceFrameTarget target,
+            out string frameName,
+            out Vector3d framePosition,
+            out Vector3d frameVelocity,
+            out double frameStandardGravitationalParameter,
+            out double frameRadius,
+            out double sphereOfInfluenceRadius)
+        {
+            EnsureInitialized();
+
+            if (target == ReferenceFrameTarget.Jupiter)
+            {
+                frameName = "Jupiter";
+                framePosition = jupiterRealPosition;
+                frameVelocity = Vector3d.Zero;
+                frameStandardGravitationalParameter = jupiterStandardGravitationalParameter;
+                frameRadius = jupiterRadius;
+                sphereOfInfluenceRadius = double.PositiveInfinity;
+                return true;
+            }
+
+            int moonIndex = FindMoonIndex(target);
+            if (moonIndex < 0 || moonIndex >= moonBodies.Count || moonIndex >= moonRails.Count)
+            {
+                frameName = target.ToString();
+                framePosition = Vector3d.Zero;
+                frameVelocity = Vector3d.Zero;
+                frameStandardGravitationalParameter = 0d;
+                frameRadius = 0d;
+                sphereOfInfluenceRadius = 0d;
+                return false;
+            }
+
+            MoonRail rail = moonRails[moonIndex];
+            CelestialBody moonBody = moonBodies[moonIndex];
+            frameName = string.IsNullOrWhiteSpace(rail.Name) ? target.ToString() : rail.Name;
+            framePosition = moonBody.Position;
+            frameVelocity = moonBody.Velocity;
+            frameStandardGravitationalParameter = rail.ResolveStandardGravitationalParameter();
+            frameRadius = rail.Radius;
+            sphereOfInfluenceRadius = rail.SphereOfInfluenceRadius;
+            return true;
+        }
+
+        public bool TryGetReferenceStateAtTime(
+            ReferenceFrameTarget target,
+            double sampleTimeSeconds,
             out string frameName,
             out Vector3d framePosition,
             out Vector3d frameVelocity,
@@ -703,6 +822,8 @@ namespace Galilego.Physics
             frameStandardGravitationalParameter = 0d;
             frameRadius = 0d;
             sphereOfInfluenceRadius = 0d;
+
+            EnsureInitialized();
 
             if (target == ReferenceFrameTarget.Jupiter)
             {
@@ -722,10 +843,8 @@ namespace Galilego.Physics
             }
 
             MoonRail rail = moonRails[moonIndex];
-            CelestialBody moonBody = moonBodies[moonIndex];
             frameName = string.IsNullOrWhiteSpace(rail.Name) ? target.ToString() : rail.Name;
-            framePosition = moonBody.Position;
-            frameVelocity = moonBody.Velocity;
+            EvaluateMoonState(rail, sampleTimeSeconds, out framePosition, out frameVelocity);
             frameStandardGravitationalParameter = rail.ResolveStandardGravitationalParameter();
             frameRadius = rail.Radius;
             sphereOfInfluenceRadius = rail.SphereOfInfluenceRadius;
@@ -785,6 +904,20 @@ namespace Galilego.Physics
             }
         }
 
+        private Vector3d ResolveActiveReferenceVisualPosition()
+        {
+            return TryGetReferenceState(
+                ResolveActiveReferenceFrameTarget(),
+                out _,
+                out Vector3d framePosition,
+                out _,
+                out _,
+                out _,
+                out _)
+                ? framePosition
+                : jupiterRealPosition;
+        }
+
         private void SyncAllVisuals()
         {
             // Ensure the runtime bodies are initialized and lists are in sync before applying visuals.
@@ -823,7 +956,7 @@ namespace Galilego.Physics
 
             if (moonOrbitRoot != null)
             {
-                ApplyVisualPosition(moonOrbitRoot, jupiterRealPosition);
+                ApplyVisualPosition(moonOrbitRoot, ResolveActiveReferenceVisualPosition());
             }
         }
 
@@ -1135,7 +1268,7 @@ namespace Galilego.Physics
                 moonOrbitRoot.SetParent(trajectoryVisualRoot, false);
             }
 
-            ApplyVisualPosition(moonOrbitRoot, jupiterRealPosition);
+            ApplyVisualPosition(moonOrbitRoot, ResolveActiveReferenceVisualPosition());
         }
 
         private void EnsureShipTrajectoryVisualizer()
@@ -1217,8 +1350,15 @@ namespace Galilego.Physics
             moonOrbitRoot.gameObject.SetActive(showMoonOrbits);
             if (!showMoonOrbits)
             {
+                if (jupiterOrbitRenderer != null)
+                {
+                    jupiterOrbitRenderer.gameObject.SetActive(false);
+                }
+
                 return;
             }
+
+            EnsureJupiterOrbitVisualizer();
 
             while (moonOrbitRenderers.Count < moonRails.Count)
             {
@@ -1251,9 +1391,25 @@ namespace Galilego.Physics
                 return;
             }
 
-            ApplyVisualPosition(moonOrbitRoot, jupiterRealPosition);
+            ReferenceFrameTarget activeFrame = ResolveActiveReferenceFrameTarget();
+            if (!TryGetReferenceStateAtTime(
+                activeFrame,
+                simulationTimeSeconds,
+                out _,
+                out Vector3d currentFramePosition,
+                out _,
+                out _,
+                out _,
+                out _))
+            {
+                currentFramePosition = jupiterRealPosition;
+            }
+
+            ApplyVisualPosition(moonOrbitRoot, currentFramePosition);
 
             int sampleCount = Math.Max(16, moonOrbitSamples);
+            RebuildJupiterOrbitLine(activeFrame, sampleCount);
+
             for (int railIndex = 0; railIndex < moonRails.Count; railIndex++)
             {
                 if (railIndex >= moonOrbitRenderers.Count || moonOrbitRenderers[railIndex] == null)
@@ -1263,13 +1419,23 @@ namespace Galilego.Physics
 
                 MoonRail rail = moonRails[railIndex];
                 LineRenderer orbitRenderer = moonOrbitRenderers[railIndex];
+                ReferenceFrameTarget orbitTarget = ResolveRailReferenceFrameTarget(railIndex);
+                bool shouldRender = orbitTarget != activeFrame;
+
                 orbitRenderer.gameObject.name = $"{rail.Name}_Orbit";
                 orbitRenderer.gameObject.layer = ResolveMoonOrbitLayer(rail);
-                ConfigureLineRenderer(orbitRenderer, moonOrbitColor, moonOrbitWidth, true);
+                orbitRenderer.gameObject.SetActive(shouldRender);
 
-                double semiMajorAxis = Math.Max(rail.ResolveSemiMajorAxis(), 1d);
-                double orbitalMu = jupiterStandardGravitationalParameter + rail.ResolveStandardGravitationalParameter();
-                double orbitalPeriod = 2d * Math.PI * Math.Sqrt((semiMajorAxis * semiMajorAxis * semiMajorAxis) / orbitalMu);
+                if (!shouldRender)
+                {
+                    orbitRenderer.positionCount = 0;
+                    continue;
+                }
+
+                bool shouldLoop = activeFrame == ReferenceFrameTarget.Jupiter;
+                ConfigureLineRenderer(orbitRenderer, moonOrbitColor, moonOrbitWidth, shouldLoop);
+
+                double orbitalPeriod = ResolveOrbitPeriodSeconds(rail);
 
                 orbitRenderer.positionCount = sampleCount;
                 for (int sampleIndex = 0; sampleIndex < sampleCount; sampleIndex++)
@@ -1277,9 +1443,134 @@ namespace Galilego.Physics
                     double orbitFraction = (double)sampleIndex / sampleCount;
                     double sampleTime = simulationTimeSeconds + (orbitFraction * orbitalPeriod);
                     EvaluateMoonState(rail, sampleTime, out Vector3d moonPosition, out _);
-                    orbitRenderer.SetPosition(sampleIndex, ToUnityOffset(moonPosition - jupiterRealPosition));
+
+                    if (!TryGetReferenceStateAtTime(
+                        activeFrame,
+                        sampleTime,
+                        out _,
+                        out Vector3d framePosition,
+                        out _,
+                        out _,
+                        out _,
+                        out _))
+                    {
+                        framePosition = jupiterRealPosition;
+                    }
+
+                    orbitRenderer.SetPosition(sampleIndex, ToUnityOffset(moonPosition - framePosition));
                 }
             }
+        }
+
+        private void EnsureJupiterOrbitVisualizer()
+        {
+            if (moonOrbitRoot == null || jupiterOrbitRenderer != null)
+            {
+                return;
+            }
+
+            Transform existingTransform = FindChildByName(moonOrbitRoot, "Jupiter_Orbit");
+            GameObject orbitObject = existingTransform != null
+                ? existingTransform.gameObject
+                : new GameObject("Jupiter_Orbit");
+
+            orbitObject.transform.SetParent(moonOrbitRoot, false);
+            orbitObject.layer = jupiterTransform != null ? jupiterTransform.gameObject.layer : gameObject.layer;
+
+            jupiterOrbitRenderer = orbitObject.GetComponent<LineRenderer>();
+            if (jupiterOrbitRenderer == null)
+            {
+                jupiterOrbitRenderer = orbitObject.AddComponent<LineRenderer>();
+            }
+
+            ConfigureLineRenderer(jupiterOrbitRenderer, moonOrbitColor, moonOrbitWidth, true);
+        }
+
+        private void RebuildJupiterOrbitLine(ReferenceFrameTarget activeFrame, int sampleCount)
+        {
+            if (jupiterOrbitRenderer == null)
+            {
+                return;
+            }
+
+            MoonRail activeRail = null;
+            bool shouldRender = activeFrame != ReferenceFrameTarget.Jupiter && TryGetMoonRail(activeFrame, out activeRail);
+            jupiterOrbitRenderer.gameObject.SetActive(shouldRender);
+
+            if (!shouldRender)
+            {
+                jupiterOrbitRenderer.positionCount = 0;
+                return;
+            }
+
+            ConfigureLineRenderer(jupiterOrbitRenderer, moonOrbitColor, moonOrbitWidth, true);
+            double orbitalPeriod = ResolveOrbitPeriodSeconds(activeRail);
+
+            jupiterOrbitRenderer.positionCount = sampleCount;
+            for (int sampleIndex = 0; sampleIndex < sampleCount; sampleIndex++)
+            {
+                double orbitFraction = (double)sampleIndex / sampleCount;
+                double sampleTime = simulationTimeSeconds + (orbitFraction * orbitalPeriod);
+
+                if (!TryGetReferenceStateAtTime(
+                    activeFrame,
+                    sampleTime,
+                    out _,
+                    out Vector3d framePosition,
+                    out _,
+                    out _,
+                    out _,
+                    out _))
+                {
+                    framePosition = jupiterRealPosition;
+                }
+
+                jupiterOrbitRenderer.SetPosition(sampleIndex, ToUnityOffset(jupiterRealPosition - framePosition));
+            }
+        }
+
+        private bool TryGetMoonRail(ReferenceFrameTarget target, out MoonRail rail)
+        {
+            int moonIndex = FindMoonIndex(target);
+            if (moonIndex >= 0 && moonIndex < moonRails.Count)
+            {
+                rail = moonRails[moonIndex];
+                return rail != null;
+            }
+
+            rail = null;
+            return false;
+        }
+
+        private ReferenceFrameTarget ResolveRailReferenceFrameTarget(int railIndex)
+        {
+            if (railIndex >= 0 && railIndex < moonRails.Count)
+            {
+                MoonRail rail = moonRails[railIndex];
+                if (rail != null)
+                {
+                    foreach (ReferenceFrameTarget target in Enum.GetValues(typeof(ReferenceFrameTarget)))
+                    {
+                        if (target != ReferenceFrameTarget.Jupiter &&
+                            string.Equals(rail.Name, target.ToString(), StringComparison.OrdinalIgnoreCase))
+                        {
+                            return target;
+                        }
+                    }
+                }
+            }
+
+            int enumIndex = railIndex + 1;
+            return Enum.IsDefined(typeof(ReferenceFrameTarget), enumIndex)
+                ? (ReferenceFrameTarget)enumIndex
+                : ReferenceFrameTarget.Jupiter;
+        }
+
+        private double ResolveOrbitPeriodSeconds(MoonRail rail)
+        {
+            double semiMajorAxis = Math.Max(rail.ResolveSemiMajorAxis(), 1d);
+            double orbitalMu = jupiterStandardGravitationalParameter + rail.ResolveStandardGravitationalParameter();
+            return 2d * Math.PI * Math.Sqrt((semiMajorAxis * semiMajorAxis * semiMajorAxis) / orbitalMu);
         }
 
         private void ConfigureLineRenderer(LineRenderer lineRenderer, Color color, float width, bool loop)
