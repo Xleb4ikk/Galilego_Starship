@@ -121,13 +121,28 @@ namespace Galilego.Physics
                     break;
                 }
 
-                universeManager.ApplyVisualPosition(transform, startPosition);
+                ReferenceFrameTarget referenceFrame = universeManager.ActiveReferenceFrame;
+                if (!universeManager.TryGetReferenceStateAtTime(
+                    referenceFrame,
+                    startTimeSeconds,
+                    out _,
+                    out Vector3d startFramePosition,
+                    out _,
+                    out _,
+                    out _,
+                    out _))
+                {
+                    lineRenderer.positionCount = 0;
+                    break;
+                }
+
+                universeManager.ApplyVisualPosition(transform, startFramePosition);
                 transform.rotation = Quaternion.identity;
 
                 int clampedSteps = Math.Max(1, predictionSteps);
                 EnsurePointCapacity(clampedSteps + 1);
 
-                cachedLocalPoints[0] = Vector3.zero;
+                cachedLocalPoints[0] = universeManager.ToUnityOffset(startPosition - startFramePosition);
 
                 Vector3d predictedPosition = startPosition;
                 Vector3d predictedVelocity = startVelocity;
@@ -165,7 +180,22 @@ namespace Galilego.Physics
                         }
                     }
 
-                    cachedLocalPoints[pointsWritten] = universeManager.ToUnityOffset(predictedPosition - startPosition);
+                    if (!universeManager.TryGetReferenceStateAtTime(
+                        referenceFrame,
+                        predictedTimeSeconds,
+                        out _,
+                        out Vector3d predictedFramePosition,
+                        out _,
+                        out _,
+                        out _,
+                        out _))
+                    {
+                        ApplyLine(0);
+                        rebuildCoroutine = null;
+                        yield break;
+                    }
+
+                    cachedLocalPoints[pointsWritten] = universeManager.ToUnityOffset(predictedPosition - predictedFramePosition);
                     pointsWritten++;
                     stepsSinceYield++;
 

@@ -20,6 +20,8 @@ namespace Galilego.Physics
         public double ArgumentOfPeriapsisDegrees;
         public double MeanAnomalyAtEpochDegrees;
         public double EpochTimeSeconds;
+        public double SphereOfInfluenceRadius;
+        public double HillSphereRadius;
 
         public void ApplyPeriapsisAndApoapsis()
         {
@@ -45,7 +47,7 @@ namespace Galilego.Physics
 
         public void SyncMassFromGravitationalParameter()
         {
-            if (StandardGravitationalParameter <= 0d || Mass > 0d)
+            if (StandardGravitationalParameter <= 0d)
             {
                 return;
             }
@@ -81,6 +83,20 @@ namespace Galilego.Physics
             }
 
             return PhysicsSolver.MassToStandardGravitationalParameter(Mass);
+        }
+
+        public void UpdateInfluenceRadii(double parentMass)
+        {
+            SphereOfInfluenceRadius = OrbitalElements.CalculateSphereOfInfluenceRadius(
+                ResolveSemiMajorAxis(),
+                Mass,
+                parentMass);
+
+            HillSphereRadius = OrbitalElements.CalculateHillRadius(
+                ResolveSemiMajorAxis(),
+                ResolveEccentricity(),
+                Mass,
+                parentMass);
         }
     }
 }
