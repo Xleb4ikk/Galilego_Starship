@@ -3,93 +3,107 @@ using UnityEngine.InputSystem;
 
 public class SpaceRotation : MonoBehaviour
 {
-    [Header("Rotation thrust")]
+    [Header("Сила вращения")]
     public float rotationForce = 150f;
 
-    [Header("Optional angular drag")]
-    [Min(0f)]
-    public float damping = 0f;
+    [Header("Инерция")]
+    [Range(0f, 1f)]
+    public float damping = 0.02f;
 
     private Vector3 _angularVelocity;
 
-    private void Start()
+    // ─── Клавиши (новый Input System) ────────────────────────────────────────
+    // Ось X: W / S
+    // Ось Y: A / D
+    // Ось Z: Q / E
+    // Стоп:  Space
+
+    void Start()
     {
-        Debug.Log($"[SpaceRotation] Active on '{gameObject.name}' | force={rotationForce} angularDrag={damping}");
+        Debug.Log($"[SpaceRotation] Запущен на '{gameObject.name}' | force={rotationForce} damping={damping}");
+        Debug.Log("[SpaceRotation] Управление: W/S=ОсьX  A/D=ОсьY  Q/E=ОсьZ  Space=Стоп");
     }
 
-    private void Update()
+    void Update()
     {
         HandleInput();
         ApplyInertia();
     }
 
-    private void HandleInput()
+    void HandleInput()
     {
-        Keyboard kb = Keyboard.current;
+        var kb = Keyboard.current;
         if (kb == null)
         {
+            Debug.LogWarning("[SpaceRotation] Клавиатура не найдена!");
             return;
         }
 
         float force = rotationForce * Time.deltaTime;
 
+        // Ось X
         if (kb.wKey.isPressed)
         {
             _angularVelocity.x -= force;
+            Debug.Log($"[SpaceRotation] W нажата → X velocity: {_angularVelocity.x:F2}");
         }
-
         if (kb.sKey.isPressed)
         {
             _angularVelocity.x += force;
+            Debug.Log($"[SpaceRotation] S нажата → X velocity: {_angularVelocity.x:F2}");
         }
 
+        // Ось Y
         if (kb.aKey.isPressed)
         {
             _angularVelocity.y -= force;
+            Debug.Log($"[SpaceRotation] A нажата → Y velocity: {_angularVelocity.y:F2}");
         }
-
         if (kb.dKey.isPressed)
         {
             _angularVelocity.y += force;
+            Debug.Log($"[SpaceRotation] D нажата → Y velocity: {_angularVelocity.y:F2}");
         }
 
+        // Ось Z
         if (kb.qKey.isPressed)
         {
             _angularVelocity.z += force;
+            Debug.Log($"[SpaceRotation] Q нажата → Z velocity: {_angularVelocity.z:F2}");
         }
-
         if (kb.eKey.isPressed)
         {
             _angularVelocity.z -= force;
+            Debug.Log($"[SpaceRotation] E нажата → Z velocity: {_angularVelocity.z:F2}");
         }
 
+        // Стоп
         if (kb.spaceKey.wasPressedThisFrame)
         {
+            Debug.Log("[SpaceRotation] СТОП — угловая скорость сброшена");
             Stop();
         }
     }
 
-    private void ApplyInertia()
+    void ApplyInertia()
     {
-        if (_angularVelocity.sqrMagnitude > 0f)
+        if (_angularVelocity.magnitude > 0.01f)
         {
             transform.Rotate(
                 _angularVelocity.x * Time.deltaTime,
                 _angularVelocity.y * Time.deltaTime,
                 _angularVelocity.z * Time.deltaTime,
-                Space.World);
+                Space.World
+            );
         }
 
-        if (damping > 0f)
-        {
-            float drag = Mathf.Clamp01(damping * Time.deltaTime);
-            _angularVelocity = Vector3.Lerp(_angularVelocity, Vector3.zero, drag);
-        }
+        _angularVelocity = Vector3.Lerp(_angularVelocity, Vector3.zero, damping);
     }
 
     public void AddTorque(Vector3 torque)
     {
         _angularVelocity += torque;
+        Debug.Log($"[SpaceRotation] AddTorque: {torque} → velocity: {_angularVelocity}");
     }
 
     public void Stop()

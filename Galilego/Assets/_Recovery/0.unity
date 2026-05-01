@@ -202,7 +202,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: f4688fdb7df04437aeb418b961361dc5, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: Unity.TextMeshPro::TMPro.TextMeshProUGUI
   m_Material: {fileID: 0}
   m_Color: {r: 1, g: 1, b: 1, a: 1}
@@ -905,7 +905,7 @@ Camera:
   m_Depth: -1
   m_CullingMask:
     serializedVersion: 2
-    m_Bits: 321
+    m_Bits: 65
   m_RenderingPath: -1
   m_TargetTexture: {fileID: 0}
   m_TargetDisplay: 0
@@ -1459,7 +1459,7 @@ GameObject:
   - component: {fileID: 598997630}
   - component: {fileID: 598997629}
   - component: {fileID: 598997628}
-  m_Layer: 8
+  m_Layer: 0
   m_Name: TrajectoryPredictor
   m_TagString: Untagged
   m_Icon: {fileID: 0}
@@ -2462,7 +2462,7 @@ Transform:
   m_Children:
   - {fileID: 330585546}
   - {fileID: 1077664053}
-  m_Father: {fileID: 0}
+  m_Father: {fileID: 1390413975}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1 &991459870
 GameObject:
@@ -2725,7 +2725,7 @@ GameObject:
   - component: {fileID: 1077664054}
   m_Layer: 0
   m_Name: ShipCamera
-  m_TagString: Untagged
+  m_TagString: MainCamera
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
@@ -2836,7 +2836,7 @@ Camera:
   m_Depth: -1
   m_CullingMask:
     serializedVersion: 2
-    m_Bits: 128
+    m_Bits: 384
   m_RenderingPath: -1
   m_TargetTexture: {fileID: 0}
   m_TargetDisplay: 0
@@ -3584,7 +3584,6 @@ GameObject:
   - component: {fileID: 1390413974}
   - component: {fileID: 1390413973}
   - component: {fileID: 1390413972}
-  - component: {fileID: 1390413976}
   m_Layer: 7
   m_Name: PlayerShip
   m_TagString: Untagged
@@ -3682,25 +3681,12 @@ Transform:
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
   m_LocalPosition: {x: 57.48206, y: 0, z: -100}
-  m_LocalScale: {x: 0.000003, y: 0.000003, z: 0.000003}
+  m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
-  m_Children: []
+  m_Children:
+  - {fileID: 970611500}
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
---- !u!114 &1390413976
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 1390413971}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: ff485b1d430e9d8478e619a2fbc3c588, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: Assembly-CSharp::SpaceRotation
-  rotationForce: 150
-  damping: 0.02
 --- !u!1 &1513439207
 GameObject:
   m_ObjectHideFlags: 0
@@ -4148,7 +4134,6 @@ MonoBehaviour:
   ship:
     VisualTransform: {fileID: 1390413975}
     Mass: 1000
-    VisualRadiusMeters: 3
     InitialPosition:
       X: 0
       Y: 0
@@ -4223,28 +4208,6 @@ MonoBehaviour:
     SphereOfInfluenceRadius: 37680910.00701851
     HillSphereRadius: 49789775.66815525
   worldContainer: {fileID: 1581560979}
-  celestialCamera: {fileID: 330585545}
-  shipOverlayCamera: {fileID: 1077664056}
-  cameraMode: 0
-  enableCameraToggle: 1
-  shipFocusDistanceMeters: 40
-  shipFocusHeightMeters: 0
-  shipFocusFieldOfView: 45
-  shipFocusYawDegrees: 0
-  shipFocusPitchDegrees: 12
-  minShipFocusDistanceMeters: 0.5
-  maxShipFocusDistanceMeters: 50000000
-  shipZoomSensitivity: 0.18
-  orbitMapYawDegrees: 0
-  orbitMapPadding: 1.25
-  orbitMapPitchDegrees: 80
-  minOrbitMapOrthographicSize: 10
-  maxOrbitMapZoomMultiplier: 6
-  orbitMapZoomSensitivity: 0.12
-  cameraOrbitSensitivity: 0.18
-  cameraRotationSmoothing: 14
-  cameraZoomSmoothing: 10
-  orbitMapFocusTarget: 0
   visualDistanceMultiplier: 0.1
   simulationTimeSeconds: 0
   timeScale: 1
@@ -4265,9 +4228,6 @@ MonoBehaviour:
   moonOrbitSamples: 256
   shipTrajectoryWidth: 0.2
   moonOrbitWidth: 0.08
-  moonOrbitScreenWidth: 3
-  moonOrbitTailAlpha: 1
-  moonOrbitAheadAlpha: 0.08
   shipTrajectoryColor: {r: 0.25, g: 0.95, b: 1, a: 0.95}
   moonOrbitColor: {r: 0.65, g: 0.85, b: 1, a: 0.4}
   showTelemetryOverlay: 1
@@ -4277,8 +4237,6 @@ MonoBehaviour:
     y: 12
     width: 460
     height: 420
-  telemetryOverlayMinSize: {x: 320, y: 220}
-  telemetryOverlayMaxSize: {x: 900, y: 760}
   warnOnInvalidCoordinates: 1
 --- !u!4 &1581560979
 Transform:
