@@ -4247,6 +4247,7 @@ MonoBehaviour:
   cameraOrbitSensitivity: 0.18
   cameraRotationSmoothing: 14
   cameraZoomSmoothing: 10
+  orbitMapFocusTarget: 0
   visualDistanceMultiplier: 0.1
   simulationTimeSeconds: 0
   timeScale: 1
@@ -4279,6 +4280,8 @@ MonoBehaviour:
     y: 12
     width: 460
     height: 420
+  telemetryOverlayMinSize: {x: 320, y: 220}
+  telemetryOverlayMaxSize: {x: 900, y: 760}
   warnOnInvalidCoordinates: 1
 --- !u!4 &1581560979
 Transform:
