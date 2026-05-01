@@ -10,6 +10,9 @@ namespace Galilego.Physics
         [SerializeField] private UniverseManager universeManager;
         [SerializeField] private Transform shipOrientation;
         [SerializeField] private RectTransform ball;
+        [SerializeField] private RawImage ballImage;
+        [SerializeField] private NavballSphereGraphic ballSphere;
+        [SerializeField] private NavballFrameGraphic frameGraphic;
         [SerializeField] private TMP_Text frameLabel;
 
         [Header("Markers")]
@@ -29,8 +32,14 @@ namespace Galilego.Physics
         [SerializeField] private bool hideBacksideMarkers = true;
         [SerializeField] private float backsideScale = 0.65f;
         [SerializeField] private float minimumDirectionMagnitude = 1e-4f;
+        [SerializeField] private bool driveBallTexture = true;
+        [SerializeField] private bool alignToOrbitalFrame;
+        [SerializeField] private Vector3 shipLocalForward = Vector3.up;
+        [SerializeField] private Vector3 shipLocalUp = Vector3.forward;
+        [SerializeField] private bool flipBallVertical = true;
+        [SerializeField] private Vector2 ballUvSize = new Vector2(0.42f, 0.42f);
 
-        private void Update()
+        private void LateUpdate()
         {
             ResolveReferences();
 
@@ -64,22 +73,33 @@ namespace Galilego.Physics
             Vector3 normal = ToUnityDirection(Vector3d.Cross(relativePosition, relativeVelocity));
 
             Vector3 localNorth = ResolveLocalNorth(radialOut);
-            Vector3 localEast = Vector3.Cross(radialOut, localNorth).normalized;
+            Vector3 localEast = ResolveLocalEast(radialOut, localNorth);
+            Quaternion displayRotation = ResolveDisplayRotation(radialOut, velocity, localNorth, localEast);
 
-            SetMarker(progradeMarker, velocity);
-            SetMarker(retrogradeMarker, -velocity);
-            SetMarker(radialOutMarker, radialOut);
-            SetMarker(radialInMarker, -radialOut);
-            SetMarker(normalMarker, normal);
-            SetMarker(antiNormalMarker, -normal);
-            SetMarker(northMarker, localNorth);
-            SetMarker(southMarker, -localNorth);
-            SetMarker(eastMarker, localEast);
-            SetMarker(westMarker, -localEast);
-
-            if (ball != null)
+            Vector3 ballRadialOut = radialOut;
+            Vector3 ballLocalEast = localEast;
+            if (flipBallVertical)
             {
-                Vector3 localNorthOnBall = shipOrientation.InverseTransformDirection(localNorth);
+                ballRadialOut = -ballRadialOut;
+                ballLocalEast = -ballLocalEast;
+            }
+
+            UpdateBall(ballRadialOut, localNorth, ballLocalEast, displayRotation);
+
+            SetMarker(progradeMarker, velocity, displayRotation);
+            SetMarker(retrogradeMarker, -velocity, displayRotation);
+            SetMarker(radialOutMarker, radialOut, displayRotation);
+            SetMarker(radialInMarker, -radialOut, displayRotation);
+            SetMarker(normalMarker, normal, displayRotation);
+            SetMarker(antiNormalMarker, -normal, displayRotation);
+            SetMarker(northMarker, localNorth, displayRotation);
+            SetMarker(southMarker, -localNorth, displayRotation);
+            SetMarker(eastMarker, localEast, displayRotation);
+            SetMarker(westMarker, -localEast, displayRotation);
+
+            if (ball != null && ballSphere == null)
+            {
+                Vector3 localNorthOnBall = Quaternion.Inverse(displayRotation) * localNorth;
                 float northAngle = Mathf.Atan2(localNorthOnBall.y, localNorthOnBall.x) * Mathf.Rad2Deg;
                 ball.localRotation = Quaternion.Euler(0f, 0f, northAngle - 90f);
             }
@@ -107,6 +127,153 @@ namespace Galilego.Physics
             return localNorth.sqrMagnitude > 0f ? localNorth.normalized : Vector3.up;
         }
 
+        private Vector3 ResolveLocalEast(Vector3 radialOut, Vector3 localNorth)
+        {
+            if (!IsUsableDirection(radialOut) || !IsUsableDirection(localNorth))
+            {
+                return universeManager.AstrodynamicEastUnityDirection;
+            }
+
+            Vector3 localEast = Vector3.Cross(localNorth, radialOut);
+            if (!IsUsableDirection(localEast))
+            {
+                localEast = Vector3.ProjectOnPlane(universeManager.AstrodynamicEastUnityDirection, radialOut);
+            }
+
+            return IsUsableDirection(localEast) ? localEast.normalized : Vector3.right;
+        }
+
+        private Quaternion ResolveDisplayRotation(Vector3 radialOut, Vector3 velocity, Vector3 localNorth, Vector3 localEast)
+        {
+            if (alignToOrbitalFrame)
+            {
+                Vector3 forward = IsUsableDirection(velocity) ? velocity.normalized : shipOrientation.forward;
+                Vector3 up = IsUsableDirection(radialOut) ? radialOut.normalized : shipOrientation.up;
+
+                up = Vector3.ProjectOnPlane(up, forward);
+                if (!IsUsableDirection(up))
+                {
+                    up = Vector3.ProjectOnPlane(localNorth, forward);
+                }
+
+                if (!IsUsableDirection(up))
+                {
+                    up = Vector3.ProjectOnPlane(localEast, forward);
+                }
+
+                if (!IsUsableDirection(forward) || !IsUsableDirection(up))
+                {
+                    return shipOrientation.rotation;
+                }
+
+                return Quaternion.LookRotation(forward.normalized, up.normalized);
+            }
+
+            Vector3 shipForward = TransformShipAxis(shipLocalForward, shipOrientation.forward);
+            if (!IsUsableDirection(shipForward))
+            {
+                return shipOrientation.rotation;
+            }
+
+            Vector3 shipUp = TransformShipAxis(shipLocalUp, shipOrientation.up);
+            Vector3 displayUp = ProjectDisplayUp(shipUp, shipForward);
+            if (!IsUsableDirection(displayUp))
+            {
+                displayUp = ProjectDisplayUp(shipOrientation.up, shipForward);
+            }
+
+            if (!IsUsableDirection(displayUp))
+            {
+                displayUp = ProjectDisplayUp(radialOut, shipForward);
+            }
+
+            return IsUsableDirection(displayUp)
+                ? Quaternion.LookRotation(shipForward.normalized, displayUp.normalized)
+                : shipOrientation.rotation;
+        }
+
+        private Vector3 TransformShipAxis(Vector3 localAxis, Vector3 fallbackWorldAxis)
+        {
+            return IsUsableDirection(localAxis)
+                ? shipOrientation.TransformDirection(localAxis.normalized).normalized
+                : fallbackWorldAxis.normalized;
+        }
+
+        private Vector3 ProjectDisplayUp(Vector3 candidate, Vector3 forward)
+        {
+            if (!IsUsableDirection(candidate) || !IsUsableDirection(forward))
+            {
+                return Vector3.zero;
+            }
+
+            Vector3 projected = Vector3.ProjectOnPlane(candidate, forward.normalized);
+            return IsUsableDirection(projected) ? projected.normalized : Vector3.zero;
+        }
+
+        private void UpdateBall(Vector3 radialOut, Vector3 localNorth, Vector3 localEast, Quaternion displayRotation)
+        {
+            if (ballSphere != null)
+            {
+                UpdateBallSphere(radialOut, localNorth, localEast, displayRotation);
+                if (ball != null)
+                {
+                    ball.localRotation = Quaternion.identity;
+                }
+
+                return;
+            }
+
+            UpdateBallTexture(radialOut, localNorth, localEast, displayRotation);
+        }
+
+        private void UpdateBallSphere(Vector3 radialOut, Vector3 localNorth, Vector3 localEast, Quaternion displayRotation)
+        {
+            if (!driveBallTexture || ballSphere == null || shipOrientation == null)
+            {
+                return;
+            }
+
+            if (!IsUsableDirection(radialOut) || !IsUsableDirection(localNorth) || !IsUsableDirection(localEast))
+            {
+                return;
+            }
+
+            Quaternion worldToDisplay = Quaternion.Inverse(displayRotation);
+            ballSphere.SetReferenceBasis(
+                worldToDisplay * radialOut.normalized,
+                worldToDisplay * localNorth.normalized,
+                worldToDisplay * localEast.normalized);
+        }
+
+        private void UpdateBallTexture(Vector3 radialOut, Vector3 localNorth, Vector3 localEast, Quaternion displayRotation)
+        {
+            if (!driveBallTexture || ballImage == null || shipOrientation == null)
+            {
+                return;
+            }
+
+            if (!IsUsableDirection(radialOut) || !IsUsableDirection(localNorth) || !IsUsableDirection(localEast))
+            {
+                return;
+            }
+
+            Vector3 forward = displayRotation * Vector3.forward;
+            float headingRadians = Mathf.Atan2(Vector3.Dot(forward, localEast), Vector3.Dot(forward, localNorth));
+            float pitchRadians = Mathf.Asin(Mathf.Clamp(Vector3.Dot(forward, radialOut), -1f, 1f));
+
+            float width = Mathf.Clamp(ballUvSize.x, 0.05f, 1f);
+            float height = Mathf.Clamp(ballUvSize.y, 0.05f, 1f);
+            float centerU = Mathf.Repeat(0.5f + (headingRadians / (Mathf.PI * 2f)), 1f);
+            float centerV = Mathf.Clamp01(0.5f + (pitchRadians / Mathf.PI));
+
+            ballImage.uvRect = new Rect(centerU - (width * 0.5f), centerV - (height * 0.5f), width, height);
+        }
+
+        private bool IsUsableDirection(Vector3 direction)
+        {
+            return direction.sqrMagnitude > minimumDirectionMagnitude * minimumDirectionMagnitude;
+        }
+
         private Vector3 ToUnityDirection(Vector3d direction)
         {
             Vector3 unityDirection = universeManager.ToUnityDirection(direction);
@@ -115,7 +282,7 @@ namespace Galilego.Physics
                 : Vector3.zero;
         }
 
-        private void SetMarker(RectTransform marker, Vector3 worldDirection)
+        private void SetMarker(RectTransform marker, Vector3 worldDirection, Quaternion displayRotation)
         {
             if (marker == null)
             {
@@ -128,7 +295,7 @@ namespace Galilego.Physics
                 return;
             }
 
-            Vector3 localDirection = shipOrientation.InverseTransformDirection(worldDirection.normalized);
+            Vector3 localDirection = Quaternion.Inverse(displayRotation) * worldDirection.normalized;
             bool isFrontSide = localDirection.z >= 0f;
 
             if (hideBacksideMarkers && !isFrontSide)
@@ -180,6 +347,26 @@ namespace Galilego.Physics
             if (shipOrientation == null && universeManager != null)
             {
                 shipOrientation = universeManager.ShipVisualTransform;
+            }
+
+            if (ballImage == null)
+            {
+                ballImage = ballSphere != null ? ballSphere : GetComponentInChildren<RawImage>(true);
+            }
+
+            if (ball == null && ballImage != null)
+            {
+                ball = ballImage.rectTransform;
+            }
+
+            if (ballSphere == null)
+            {
+                ballSphere = GetComponentInChildren<NavballSphereGraphic>(true);
+            }
+
+            if (frameGraphic == null)
+            {
+                frameGraphic = GetComponentInChildren<NavballFrameGraphic>(true);
             }
         }
     }

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using UnityEngine;
+using UnityEngine.InputSystem;
 using UnityEngine.SceneManagement;
 
 namespace Galilego.Physics
@@ -20,6 +21,12 @@ namespace Galilego.Physics
         UnityXyPlaneZUp = 1
     }
 
+    public enum SpaceCameraMode
+    {
+        ShipFocus = 0,
+        OrbitMap = 1
+    }
+
     public sealed class UniverseManager : MonoBehaviour
     {
         [Header("Jupiter")]
@@ -37,6 +44,34 @@ namespace Galilego.Physics
 
         [Header("Scene")]
         [SerializeField] private Transform worldContainer;
+
+        [Header("Camera Modes")]
+        [SerializeField] private Camera celestialCamera;
+        [SerializeField] private Camera shipOverlayCamera;
+        [SerializeField] private SpaceCameraMode cameraMode = SpaceCameraMode.ShipFocus;
+        [SerializeField] private bool enableCameraToggle = true;
+        [SerializeField] private double shipFocusDistanceMeters = 24d;
+        [SerializeField] private double shipFocusHeightMeters = 8d;
+        [SerializeField] private float shipFocusFieldOfView = 45f;
+        [SerializeField] private float shipFocusYawDegrees;
+        [SerializeField] private float shipFocusPitchDegrees = 12f;
+        [SerializeField] private double minShipFocusDistanceMeters = 0.5d;
+        [SerializeField] private double maxShipFocusDistanceMeters = 5e7d;
+        [SerializeField] private float shipZoomSensitivity = 0.18f;
+        [SerializeField] private float orbitMapYawDegrees;
+        [SerializeField] private float orbitMapPadding = 1.25f;
+        [SerializeField] private float orbitMapPitchDegrees = 80f;
+        [SerializeField] private float minOrbitMapOrthographicSize = 10f;
+        [SerializeField] private float maxOrbitMapZoomMultiplier = 6f;
+        [SerializeField] private float orbitMapZoomSensitivity = 0.12f;
+        [SerializeField] private float orbitMapFieldOfView = 45f;
+        [SerializeField] private float orbitMapMinMoonScreenRadius = 5f;
+        [SerializeField] private float orbitMapMinJupiterScreenRadius = 18f;
+        [SerializeField] private double orbitMapSurfaceClearanceMeters = 500d;
+        [SerializeField] private float cameraOrbitSensitivity = 0.18f;
+        [SerializeField] private float cameraRotationSmoothing = 14f;
+        [SerializeField] private float cameraZoomSmoothing = 10f;
+        [SerializeField] private ReferenceFrameTarget orbitMapFocusTarget = ReferenceFrameTarget.Jupiter;
 
         [Header("Visual Scale")]
         [SerializeField] private double visualDistanceMultiplier = 0.1d;
@@ -65,12 +100,17 @@ namespace Galilego.Physics
         [SerializeField] private int moonOrbitSamples = 256;
         [SerializeField] private float shipTrajectoryWidth = 0.2f;
         [SerializeField] private float moonOrbitWidth = 0.08f;
+        [SerializeField] private float moonOrbitScreenWidth = 3f;
+        [SerializeField] private float moonOrbitTailAlpha = 1f;
+        [SerializeField] private float moonOrbitAheadAlpha = 0.08f;
         [SerializeField] private Color shipTrajectoryColor = new Color(0.25f, 0.95f, 1f, 0.95f);
         [SerializeField] private Color moonOrbitColor = new Color(0.65f, 0.85f, 1f, 0.4f);
 
         [Header("Telemetry Overlay")]
         [SerializeField] private bool showTelemetryOverlay = true;
         [SerializeField] private Rect telemetryOverlayRect = new Rect(12f, 12f, 460f, 420f);
+        [SerializeField] private Vector2 telemetryOverlayMinSize = new Vector2(320f, 220f);
+        [SerializeField] private Vector2 telemetryOverlayMaxSize = new Vector2(900f, 760f);
 
         [Header("Debug")]
         [SerializeField] private bool warnOnInvalidCoordinates = true;
@@ -85,10 +125,35 @@ namespace Galilego.Physics
         private Vector3d floatingOriginOffset = Vector3d.Zero;
         private Transform trajectoryVisualRoot;
         private Transform moonOrbitRoot;
+        private Transform orbitMapMarkerRoot;
         private LineRenderer jupiterOrbitRenderer;
         private TrajectoryPredictor shipTrajectoryPredictor;
         private Material runtimeLineMaterial;
+        private Material runtimeOrbitMapMarkerMaterial;
         private ReferenceFrameTarget lastActiveReferenceFrame = ReferenceFrameTarget.Jupiter;
+        private float orbitMapOrthographicSize;
+        private bool cameraStateInitialized;
+        private double smoothedShipFocusDistanceMeters;
+        private float smoothedShipFocusYawDegrees;
+        private float smoothedShipFocusPitchDegrees;
+        private float smoothedOrbitMapYawDegrees;
+        private float smoothedOrbitMapPitchDegrees;
+        private float smoothedOrbitMapOrthographicSize;
+        private Vector2 telemetryOverlayScroll;
+        private bool isResizingTelemetryOverlay;
+        private Vector2 telemetryResizeStartMouse;
+        private Vector2 telemetryResizeStartSize;
+        private readonly Dictionary<ReferenceFrameTarget, Transform> orbitMapMarkers = new Dictionary<ReferenceFrameTarget, Transform>();
+        private readonly Dictionary<ReferenceFrameTarget, Renderer> orbitMapMarkerRenderers = new Dictionary<ReferenceFrameTarget, Renderer>();
+        private readonly List<Renderer> rendererBuffer = new List<Renderer>();
+
+        private const float MinimumCameraNearClipPlane = 0.0000001f;
+        private const float MaximumCelestialNearClipPlane = 0.01f;
+        private const float MarkerVisibleScreenRadiusMultiplier = 3f;
+        private const double DefaultOrbitMapSurfaceClearanceMeters = 500d;
+        private const double MinimumOrbitMapSurfaceClearanceMeters = 50d;
+        private const double MaximumOrbitMapSurfaceClearanceMeters = 2500d;
+        private const double OrbitMapSurfaceClearanceRadiusFraction = 0.0002d;
 
         public event Action<ReferenceFrameTarget> ActiveReferenceFrameChanged;
 
@@ -107,10 +172,14 @@ namespace Galilego.Physics
 
         private void Awake()
         {
+            ResolveCameraReferences();
+            DetachCameraRigFromShipIfNeeded();
             InitializeBodies();
+            ApplyFloatingOriginIfNeeded();
             SyncAllVisuals();
             EnsureTrajectoryVisuals();
             lastActiveReferenceFrame = ResolveActiveReferenceFrameTarget();
+            ApplyCameraMode();
         }
 
         private void Reset()
@@ -140,12 +209,29 @@ namespace Galilego.Physics
 
         private void Update()
         {
-            if (enableReferenceFrameHotkeys && Input.GetKeyDown(cycleReferenceFrameKey))
+            if (enableReferenceFrameHotkeys && WasCycleReferenceFramePressed())
             {
                 CycleReferenceFrame();
             }
 
+            if (enableCameraToggle && WasCameraTogglePressed())
+            {
+                ToggleCameraMode();
+            }
+
+            HandleCameraInput();
             RefreshReferenceFrameChange();
+        }
+
+        private void LateUpdate()
+        {
+            ApplyCameraMode();
+            if (cameraMode == SpaceCameraMode.OrbitMap)
+            {
+                RebuildMoonOrbitLines();
+            }
+
+            RefreshTrajectoryLineStyles();
         }
 
         private void OnGUI()
@@ -160,6 +246,7 @@ namespace Galilego.Physics
                 telemetryOverlayRect,
                 DrawTelemetryWindow,
                 "Navigation Frame");
+            telemetryOverlayRect = ClampTelemetryOverlayRect(telemetryOverlayRect);
         }
 
         public void SyncVisualFromRealCoordinates()
@@ -271,6 +358,56 @@ namespace Galilego.Physics
             SelectReferenceFrame((ReferenceFrameTarget)next);
         }
 
+        public void ToggleCameraMode()
+        {
+            SetCameraMode(cameraMode == SpaceCameraMode.ShipFocus
+                ? SpaceCameraMode.OrbitMap
+                : SpaceCameraMode.ShipFocus);
+        }
+
+        public void SetCameraMode(SpaceCameraMode mode)
+        {
+            if (cameraMode == mode)
+            {
+                return;
+            }
+
+            cameraMode = mode;
+            if (cameraMode == SpaceCameraMode.ShipFocus)
+            {
+                ApplyFloatingOriginIfNeeded();
+                SyncAllVisuals();
+            }
+
+            ApplyCameraMode();
+            if (cameraMode == SpaceCameraMode.OrbitMap)
+            {
+                EnsureTrajectoryVisuals();
+                RebuildMoonOrbitLines();
+            }
+        }
+
+        public void FocusOrbitMapOn(ReferenceFrameTarget target)
+        {
+            if (!Enum.IsDefined(typeof(ReferenceFrameTarget), target))
+            {
+                return;
+            }
+
+            orbitMapFocusTarget = target;
+            cameraMode = SpaceCameraMode.OrbitMap;
+
+            double focusRadiusMeters = ResolveReferenceRadius(target);
+            double targetSizeMeters = target == ReferenceFrameTarget.Jupiter
+                ? jupiterRadius * 3d
+                : Math.Max(focusRadiusMeters * 6d, 5e6d);
+
+            orbitMapOrthographicSize = ClampOrbitMapOrthographicSize(MetersToVisualUnitsFloat(targetSizeMeters));
+            smoothedOrbitMapOrthographicSize = orbitMapOrthographicSize;
+            RebuildMoonOrbitLines();
+            ApplyCameraMode();
+        }
+
         public bool TryGetShipRelativeState(
             ReferenceFrameTarget target,
             out string frameName,
@@ -351,7 +488,7 @@ namespace Galilego.Physics
             float uniformScale = (float)desiredDiameterInUnits;
 
             // Clamp to reasonable bounds to avoid disappearing or exploding objects at runtime.
-            const float minScale = 0.0001f;
+            const float minScale = 0.000000001f;
             const float maxScale = 10000f;
             float clamped = Mathf.Clamp(uniformScale, minScale, maxScale);
             if (!Mathf.Approximately(clamped, uniformScale))
@@ -395,17 +532,25 @@ namespace Galilego.Physics
                             Debug.LogWarning($"UniverseManager: clamped mesh-based multiplier for '{meshTransform.name}' from {scaleMultiplier} to {finalMultiplier}");
                         }
 
-                        Vector3 newLocalScale = meshTransform.localScale * finalMultiplier;
-                        meshTransform.localScale = newLocalScale;
-                        Debug.Log($"UniverseManager: scaled mesh '{meshTransform.name}' to localScale={newLocalScale} (desiredWorldRadius={desiredWorldRadius})");
+                        if (!Mathf.Approximately(finalMultiplier, 1f))
+                        {
+                            Vector3 newLocalScale = meshTransform.localScale * finalMultiplier;
+                            meshTransform.localScale = newLocalScale;
+                            Debug.Log($"UniverseManager: scaled mesh '{meshTransform.name}' to localScale={newLocalScale} (desiredWorldRadius={desiredWorldRadius})");
+                        }
+
                         return;
                     }
                 }
             }
 
             // Fallback: assume model radius 0.5 at localScale == 1
-            target.localScale = new Vector3(clamped, clamped, clamped);
-            Debug.Log($"UniverseManager: scaled '{target.name}' fallback. uniformScale={clamped}");
+            Vector3 fallbackScale = new Vector3(clamped, clamped, clamped);
+            if (!Approximately(target.localScale, fallbackScale))
+            {
+                target.localScale = fallbackScale;
+                Debug.Log($"UniverseManager: scaled '{target.name}' fallback. uniformScale={clamped}");
+            }
         }
 
         public Vector3d EvaluateShipAccelerationAt(Vector3d shipPosition, double sampleTimeSeconds)
@@ -462,6 +607,98 @@ namespace Galilego.Physics
                 floatingOriginThreshold = 5000d;
             }
 
+            if (ship != null && ship.VisualRadiusMeters <= 0d)
+            {
+                ship.VisualRadiusMeters = 3d;
+            }
+
+            if (shipFocusDistanceMeters <= 0d)
+            {
+                shipFocusDistanceMeters = 24d;
+            }
+
+            if (shipFocusHeightMeters < 0d)
+            {
+                shipFocusHeightMeters = 0d;
+            }
+
+            if (minShipFocusDistanceMeters <= 0d)
+            {
+                minShipFocusDistanceMeters = 0.5d;
+            }
+
+            if (maxShipFocusDistanceMeters <= minShipFocusDistanceMeters)
+            {
+                maxShipFocusDistanceMeters = minShipFocusDistanceMeters * 2d;
+            }
+
+            shipFocusPitchDegrees = Mathf.Clamp(shipFocusPitchDegrees, -85f, 85f);
+
+            if (shipFocusFieldOfView <= 0f)
+            {
+                shipFocusFieldOfView = 45f;
+            }
+
+            if (orbitMapPadding < 1f)
+            {
+                orbitMapPadding = 1f;
+            }
+
+            orbitMapPitchDegrees = NormalizeDegrees(orbitMapPitchDegrees);
+
+            if (minOrbitMapOrthographicSize <= 0f)
+            {
+                minOrbitMapOrthographicSize = 10f;
+            }
+
+            if (maxOrbitMapZoomMultiplier < 1f)
+            {
+                maxOrbitMapZoomMultiplier = 1f;
+            }
+
+            shipZoomSensitivity = Mathf.Clamp(shipZoomSensitivity, 0.01f, 0.95f);
+            orbitMapZoomSensitivity = Mathf.Clamp(orbitMapZoomSensitivity, 0.01f, 0.95f);
+
+            if (orbitMapFieldOfView <= 0f)
+            {
+                orbitMapFieldOfView = 45f;
+            }
+
+            if (orbitMapMinMoonScreenRadius <= 0f)
+            {
+                orbitMapMinMoonScreenRadius = 5f;
+            }
+
+            if (orbitMapMinJupiterScreenRadius <= 0f)
+            {
+                orbitMapMinJupiterScreenRadius = 18f;
+            }
+
+            if (orbitMapSurfaceClearanceMeters <= 0d)
+            {
+                orbitMapSurfaceClearanceMeters = DefaultOrbitMapSurfaceClearanceMeters;
+            }
+
+            if (cameraOrbitSensitivity <= 0f)
+            {
+                cameraOrbitSensitivity = 0.18f;
+            }
+
+            if (cameraRotationSmoothing <= 0f)
+            {
+                cameraRotationSmoothing = 14f;
+            }
+
+            if (cameraZoomSmoothing <= 0f)
+            {
+                cameraZoomSmoothing = 10f;
+            }
+
+            if (!Enum.IsDefined(typeof(ReferenceFrameTarget), orbitMapFocusTarget))
+            {
+                orbitMapFocusTarget = ReferenceFrameTarget.Jupiter;
+            }
+
             if (shipPredictionSteps < 1)
             {
                 shipPredictionSteps = 1;
@@ -496,6 +733,21 @@ namespace Galilego.Physics
             {
                 moonOrbitWidth = 0.08f;
             }
+
+            if (moonOrbitScreenWidth <= 0f)
+            {
+                moonOrbitScreenWidth = 3f;
+            }
+
+            moonOrbitTailAlpha = Mathf.Clamp01(moonOrbitTailAlpha);
+            moonOrbitAheadAlpha = Mathf.Clamp01(moonOrbitAheadAlpha);
+
+            telemetryOverlayMinSize.x = Mathf.Max(240f, telemetryOverlayMinSize.x);
+            telemetryOverlayMinSize.y = Mathf.Max(160f, telemetryOverlayMinSize.y);
+            telemetryOverlayMaxSize.x = Mathf.Max(telemetryOverlayMinSize.x, telemetryOverlayMaxSize.x);
+            telemetryOverlayMaxSize.y = Mathf.Max(telemetryOverlayMinSize.y, telemetryOverlayMaxSize.y);
+            telemetryOverlayRect.width = Mathf.Clamp(telemetryOverlayRect.width, telemetryOverlayMinSize.x, telemetryOverlayMaxSize.x);
+            telemetryOverlayRect.height = Mathf.Clamp(telemetryOverlayRect.height, telemetryOverlayMinSize.y, telemetryOverlayMaxSize.y);
 
             if (jupiterStandardGravitationalParameter <= 0d)
             {
@@ -612,15 +864,27 @@ namespace Galilego.Physics
         private void DrawTelemetryWindow(int windowId)
         {
             ReferenceFrameTarget activeFrame = ResolveActiveReferenceFrameTarget();
-            autoSelectSphereOfInfluence = GUILayout.Toggle(autoSelectSphereOfInfluence, "Auto SOI frame");
+
+            telemetryOverlayScroll = GUILayout.BeginScrollView(telemetryOverlayScroll, false, true);
 
             GUILayout.BeginHorizontal();
-            DrawFrameButton(ReferenceFrameTarget.Jupiter);
-            DrawFrameButton(ReferenceFrameTarget.Io);
-            DrawFrameButton(ReferenceFrameTarget.Europa);
-            DrawFrameButton(ReferenceFrameTarget.Ganymede);
-            DrawFrameButton(ReferenceFrameTarget.Callisto);
+            bool autoSoi = GUILayout.Toggle(autoSelectSphereOfInfluence, "Auto SOI frame", GUILayout.Width(130f));
+            if (autoSoi != autoSelectSphereOfInfluence)
+            {
+                SetAutoSphereOfInfluenceSelection(autoSoi);
+            }
+
+            GUILayout.FlexibleSpace();
+            GUILayout.Label($"Camera: {cameraMode}");
             GUILayout.EndHorizontal();
+
+            GUILayout.Space(4f);
+            GUILayout.Label("Bodies");
+            DrawTelemetryTargetRow(ReferenceFrameTarget.Jupiter, activeFrame);
+            DrawTelemetryTargetRow(ReferenceFrameTarget.Io, activeFrame);
+            DrawTelemetryTargetRow(ReferenceFrameTarget.Europa, activeFrame);
+            DrawTelemetryTargetRow(ReferenceFrameTarget.Ganymede, activeFrame);
+            DrawTelemetryTargetRow(ReferenceFrameTarget.Callisto, activeFrame);
 
             if (TryGetShipRelativeState(
                 activeFrame,
@@ -637,6 +901,7 @@ namespace Galilego.Physics
                 double tangentialSpeedSquared = Math.Max(0d, relativeVelocity.SqrMagnitude - (radialSpeed * radialSpeed));
                 double altitude = distance - frameRadius;
 
+                GUILayout.Space(8f);
                 GUILayout.Label($"Frame: {frameName}  |  mu {FormatMu(frameMu)}");
                 GUILayout.Label($"r: {FormatDistance(distance)}  alt: {FormatDistance(altitude)}");
                 GUILayout.Label($"v: {FormatSpeed(speed)}  radial: {FormatSpeed(radialSpeed)}  tangential: {FormatSpeed(Math.Sqrt(tangentialSpeedSquared))}");
@@ -676,19 +941,114 @@ namespace Galilego.Physics
                 }
             }
 
-            GUI.DragWindow();
+            GUILayout.EndScrollView();
+            DrawTelemetryResizeHandle();
+            GUI.DragWindow(new Rect(0f, 0f, telemetryOverlayRect.width - 18f, 20f));
         }
 
-        private void DrawFrameButton(ReferenceFrameTarget target)
+        private void DrawTelemetryTargetRow(ReferenceFrameTarget target, ReferenceFrameTarget activeFrame)
         {
-            string label = target == selectedReferenceFrame && !autoSelectSphereOfInfluence
-                ? $"[{target}]"
-                : target.ToString();
+            GUILayout.BeginHorizontal();
+            string name = target.ToString();
+            string frameLabel = target == activeFrame ? $"[{name}]" : name;
 
-            if (GUILayout.Button(label))
+            if (GUILayout.Button(frameLabel, GUILayout.MinWidth(72f)))
             {
                 SelectReferenceFrame(target);
             }
+
+            string focusLabel = orbitMapFocusTarget == target && cameraMode == SpaceCameraMode.OrbitMap
+                ? "Focused"
+                : "Focus";
+
+            if (GUILayout.Button(focusLabel, GUILayout.Width(64f)))
+            {
+                FocusOrbitMapOn(target);
+            }
+
+            if (TryGetReferenceState(
+                target,
+                out _,
+                out Vector3d bodyPosition,
+                out _,
+                out _,
+                out double radius,
+                out _))
+            {
+                GUILayout.Label($"r {FormatDistance(radius)}  d {FormatDistance((shipBody.Position - bodyPosition).Magnitude)}");
+            }
+
+            GUILayout.EndHorizontal();
+        }
+
+        private void DrawTelemetryResizeHandle()
+        {
+            const float handleSize = 16f;
+            Rect handleRect = new Rect(
+                telemetryOverlayRect.width - handleSize - 3f,
+                telemetryOverlayRect.height - handleSize - 3f,
+                handleSize,
+                handleSize);
+
+            GUI.Box(handleRect, "//");
+            EditorGUIUtilityAddResizeCursor(handleRect);
+
+            Event currentEvent = Event.current;
+            if (currentEvent == null)
+            {
+                return;
+            }
+
+            if (currentEvent.type == EventType.MouseDown && currentEvent.button == 0 && handleRect.Contains(currentEvent.mousePosition))
+            {
+                isResizingTelemetryOverlay = true;
+                telemetryResizeStartMouse = GUIUtility.GUIToScreenPoint(currentEvent.mousePosition);
+                telemetryResizeStartSize = new Vector2(telemetryOverlayRect.width, telemetryOverlayRect.height);
+                currentEvent.Use();
+            }
+
+            if (!isResizingTelemetryOverlay)
+            {
+                return;
+            }
+
+            if (currentEvent.type == EventType.MouseDrag)
+            {
+                Vector2 currentMouse = GUIUtility.GUIToScreenPoint(currentEvent.mousePosition);
+                Vector2 delta = currentMouse - telemetryResizeStartMouse;
+                telemetryOverlayRect.width = Mathf.Clamp(
+                    telemetryResizeStartSize.x + delta.x,
+                    telemetryOverlayMinSize.x,
+                    Mathf.Min(telemetryOverlayMaxSize.x, Screen.width - telemetryOverlayRect.x));
+                telemetryOverlayRect.height = Mathf.Clamp(
+                    telemetryResizeStartSize.y + delta.y,
+                    telemetryOverlayMinSize.y,
+                    Mathf.Min(telemetryOverlayMaxSize.y, Screen.height - telemetryOverlayRect.y));
+                currentEvent.Use();
+            }
+            else if (currentEvent.type == EventType.MouseUp || currentEvent.rawType == EventType.MouseUp)
+            {
+                isResizingTelemetryOverlay = false;
+                currentEvent.Use();
+            }
+        }
+
+        private static void EditorGUIUtilityAddResizeCursor(Rect rect)
+        {
+#if UNITY_EDITOR
+            UnityEditor.EditorGUIUtility.AddCursorRect(rect, UnityEditor.MouseCursor.ResizeUpLeft);
+#endif
+        }
+
+        private Rect ClampTelemetryOverlayRect(Rect rect)
+        {
+            float maxWidth = Mathf.Min(telemetryOverlayMaxSize.x, Mathf.Max(telemetryOverlayMinSize.x, Screen.width));
+            float maxHeight = Mathf.Min(telemetryOverlayMaxSize.y, Mathf.Max(telemetryOverlayMinSize.y, Screen.height));
+            rect.width = Mathf.Clamp(rect.width, telemetryOverlayMinSize.x, maxWidth);
+            rect.height = Mathf.Clamp(rect.height, telemetryOverlayMinSize.y, maxHeight);
+            rect.x = Mathf.Clamp(rect.x, 0f, Mathf.Max(0f, Screen.width - rect.width));
+            rect.y = Mathf.Clamp(rect.y, 0f, Mathf.Max(0f, Screen.height - rect.height));
+            return rect;
         }
 
         private void RefreshReferenceFrameChange()
@@ -719,6 +1079,954 @@ namespace Galilego.Physics
             {
                 shipTrajectoryPredictor.ForceRefresh();
             }
+        }
+
+        private bool WasCameraTogglePressed()
+        {
+            Keyboard keyboard = Keyboard.current;
+            return keyboard != null && keyboard.mKey.wasPressedThisFrame;
+        }
+
+        private bool WasCycleReferenceFramePressed()
+        {
+            Keyboard keyboard = Keyboard.current;
+            if (keyboard != null)
+            {
+                switch (cycleReferenceFrameKey)
+                {
+                    case KeyCode.Tab:
+                        return keyboard.tabKey.wasPressedThisFrame;
+                    case KeyCode.M:
+                        return keyboard.mKey.wasPressedThisFrame;
+                }
+            }
+
+#if ENABLE_LEGACY_INPUT_MANAGER
+            return Input.GetKeyDown(cycleReferenceFrameKey);
+#else
+            return false;
+#endif
+        }
+
+        private void HandleCameraInput()
+        {
+            Mouse mouse = Mouse.current;
+            if (mouse == null)
+            {
+                return;
+            }
+
+            if (mouse.rightButton.isPressed)
+            {
+                Vector2 delta = mouse.delta.ReadValue();
+                if (delta.sqrMagnitude > 0f)
+                {
+                    ApplyCameraOrbit(delta);
+                }
+            }
+
+            float scrollY = mouse.scroll.ReadValue().y;
+            if (Mathf.Abs(scrollY) > 0.01f)
+            {
+                ApplyCameraZoom(NormalizeScrollSteps(scrollY));
+            }
+        }
+
+        private void ApplyCameraOrbit(Vector2 mouseDelta)
+        {
+            if (cameraMode == SpaceCameraMode.OrbitMap)
+            {
+                orbitMapYawDegrees = NormalizeDegrees(orbitMapYawDegrees + (mouseDelta.x * cameraOrbitSensitivity));
+                orbitMapPitchDegrees = NormalizeDegrees(orbitMapPitchDegrees - (mouseDelta.y * cameraOrbitSensitivity));
+                return;
+            }
+
+            shipFocusYawDegrees += mouseDelta.x * cameraOrbitSensitivity;
+            shipFocusPitchDegrees = Mathf.Clamp(
+                shipFocusPitchDegrees - (mouseDelta.y * cameraOrbitSensitivity),
+                -85f,
+                85f);
+        }
+
+        private void ApplyCameraZoom(float scrollSteps)
+        {
+            if (Mathf.Approximately(scrollSteps, 0f))
+            {
+                return;
+            }
+
+            if (cameraMode == SpaceCameraMode.OrbitMap)
+            {
+                if (orbitMapOrthographicSize <= 0f)
+                {
+                    orbitMapOrthographicSize = ResolveDefaultOrbitMapOrthographicSize();
+                }
+
+                float sensitivity = Mathf.Clamp(orbitMapZoomSensitivity, 0.01f, 0.95f);
+                float zoomFactor = Mathf.Pow(1f - sensitivity, scrollSteps);
+                orbitMapOrthographicSize = ClampOrbitMapOrthographicSize(orbitMapOrthographicSize * zoomFactor);
+                return;
+            }
+
+            double minDistance = ResolveMinShipFocusDistanceMeters();
+            double maxDistance = ResolveMaxShipFocusDistanceMeters(minDistance);
+            double sensitivityMultiplier = Math.Max(0.01d, Math.Min(0.95d, shipZoomSensitivity));
+            double distanceFactor = Math.Pow(1d - sensitivityMultiplier, scrollSteps);
+            shipFocusDistanceMeters = Clamp(shipFocusDistanceMeters * distanceFactor, minDistance, maxDistance);
+        }
+
+        private static float NormalizeScrollSteps(float rawScrollY)
+        {
+            return Mathf.Abs(rawScrollY) > 10f ? rawScrollY / 120f : rawScrollY;
+        }
+
+        private void EnsureCameraStateInitialized()
+        {
+            if (cameraStateInitialized)
+            {
+                return;
+            }
+
+            double minDistance = ResolveMinShipFocusDistanceMeters();
+            double maxDistance = ResolveMaxShipFocusDistanceMeters(minDistance);
+            shipFocusDistanceMeters = Clamp(shipFocusDistanceMeters, minDistance, maxDistance);
+            shipFocusPitchDegrees = Mathf.Clamp(shipFocusPitchDegrees, -85f, 85f);
+
+            if (orbitMapOrthographicSize <= 0f)
+            {
+                orbitMapOrthographicSize = ResolveDefaultOrbitMapOrthographicSize();
+            }
+
+            orbitMapPitchDegrees = NormalizeDegrees(orbitMapPitchDegrees);
+            orbitMapOrthographicSize = ClampOrbitMapOrthographicSize(orbitMapOrthographicSize);
+
+            smoothedShipFocusDistanceMeters = shipFocusDistanceMeters;
+            smoothedShipFocusYawDegrees = shipFocusYawDegrees;
+            smoothedShipFocusPitchDegrees = shipFocusPitchDegrees;
+            smoothedOrbitMapYawDegrees = orbitMapYawDegrees;
+            smoothedOrbitMapPitchDegrees = orbitMapPitchDegrees;
+            smoothedOrbitMapOrthographicSize = orbitMapOrthographicSize;
+            cameraStateInitialized = true;
+        }
+
+        private void UpdateSmoothedCameraState()
+        {
+            EnsureCameraStateInitialized();
+
+            double minDistance = ResolveMinShipFocusDistanceMeters();
+            double maxDistance = ResolveMaxShipFocusDistanceMeters(minDistance);
+            shipFocusDistanceMeters = Clamp(shipFocusDistanceMeters, minDistance, maxDistance);
+            shipFocusPitchDegrees = Mathf.Clamp(shipFocusPitchDegrees, -85f, 85f);
+
+            if (orbitMapOrthographicSize <= 0f)
+            {
+                orbitMapOrthographicSize = ResolveDefaultOrbitMapOrthographicSize();
+            }
+
+            orbitMapPitchDegrees = NormalizeDegrees(orbitMapPitchDegrees);
+            orbitMapOrthographicSize = ClampOrbitMapOrthographicSize(orbitMapOrthographicSize);
+
+            float rotationAlpha = ExpSmoothingAlpha(cameraRotationSmoothing);
+            float zoomAlpha = ExpSmoothingAlpha(cameraZoomSmoothing);
+
+            smoothedShipFocusYawDegrees = Mathf.LerpAngle(smoothedShipFocusYawDegrees, shipFocusYawDegrees, rotationAlpha);
+            smoothedShipFocusPitchDegrees = Mathf.Lerp(smoothedShipFocusPitchDegrees, shipFocusPitchDegrees, rotationAlpha);
+            smoothedShipFocusDistanceMeters = Lerp(smoothedShipFocusDistanceMeters, shipFocusDistanceMeters, zoomAlpha);
+
+            smoothedOrbitMapYawDegrees = Mathf.LerpAngle(smoothedOrbitMapYawDegrees, orbitMapYawDegrees, rotationAlpha);
+            smoothedOrbitMapPitchDegrees = Mathf.LerpAngle(smoothedOrbitMapPitchDegrees, orbitMapPitchDegrees, rotationAlpha);
+            smoothedOrbitMapOrthographicSize = Mathf.Lerp(smoothedOrbitMapOrthographicSize, orbitMapOrthographicSize, zoomAlpha);
+        }
+
+        private static float ExpSmoothingAlpha(float smoothing)
+        {
+            float deltaTime = Time.unscaledDeltaTime;
+            if (deltaTime <= 0f || float.IsNaN(deltaTime) || float.IsInfinity(deltaTime))
+            {
+                return 1f;
+            }
+
+            return 1f - Mathf.Exp(-Mathf.Max(0.01f, smoothing) * deltaTime);
+        }
+
+        private static float NormalizeDegrees(float degrees)
+        {
+            if (float.IsNaN(degrees) || float.IsInfinity(degrees))
+            {
+                return 0f;
+            }
+
+            return Mathf.Repeat(degrees + 180f, 360f) - 180f;
+        }
+
+        private static double Lerp(double from, double to, float t)
+        {
+            double clampedT = Mathf.Clamp01(t);
+            return from + ((to - from) * clampedT);
+        }
+
+        private void ApplyCameraMode()
+        {
+            ResolveCameraReferences();
+            if (celestialCamera == null)
+            {
+                return;
+            }
+
+            ConfigureCameraRendering();
+            UpdateSmoothedCameraState();
+
+            if (cameraMode == SpaceCameraMode.OrbitMap)
+            {
+                ApplyOrbitMapCamera();
+            }
+            else
+            {
+                ApplyShipFocusCamera();
+            }
+
+            UpdateMoonOrbitVisibility();
+            UpdateOrbitMapMarkers();
+        }
+
+        private void ResolveCameraReferences()
+        {
+            if (celestialCamera == null)
+            {
+                GameObject skyCameraObject = GameObject.Find("SkyCamera");
+                if (skyCameraObject != null)
+                {
+                    celestialCamera = skyCameraObject.GetComponent<Camera>();
+                }
+            }
+
+            if (shipOverlayCamera == null)
+            {
+                GameObject shipCameraObject = GameObject.Find("ShipCamera");
+                if (shipCameraObject != null)
+                {
+                    shipOverlayCamera = shipCameraObject.GetComponent<Camera>();
+                }
+            }
+
+            if (celestialCamera == null)
+            {
+                celestialCamera = Camera.main;
+            }
+
+            DetachCameraRigFromShipIfNeeded();
+        }
+
+        private void DetachCameraRigFromShipIfNeeded()
+        {
+            Transform shipTransform = ship != null ? ship.VisualTransform : null;
+            if (shipTransform == null)
+            {
+                return;
+            }
+
+            DetachCameraTransformFromShip(celestialCamera, shipTransform);
+            DetachCameraTransformFromShip(shipOverlayCamera, shipTransform);
+        }
+
+        private static void DetachCameraTransformFromShip(Camera camera, Transform shipTransform)
+        {
+            if (camera == null || shipTransform == null || !camera.transform.IsChildOf(shipTransform))
+            {
+                return;
+            }
+
+            Transform root = camera.transform;
+            while (root.parent != null && root.parent != shipTransform && root.parent.IsChildOf(shipTransform))
+            {
+                root = root.parent;
+            }
+
+            if (root.parent == shipTransform)
+            {
+                root.SetParent(null, true);
+            }
+        }
+
+        private void ConfigureCameraRendering()
+        {
+            celestialCamera.enabled = true;
+            celestialCamera.cullingMask = BuildLayerMask("Default", "Celestial", "Trajectory");
+            celestialCamera.eventMask = 0;
+
+            AudioListener celestialListener = celestialCamera.GetComponent<AudioListener>();
+            if (celestialListener != null)
+            {
+                celestialListener.enabled = true;
+            }
+
+            if (shipOverlayCamera == null)
+            {
+                return;
+            }
+
+            shipOverlayCamera.enabled = cameraMode == SpaceCameraMode.ShipFocus;
+            shipOverlayCamera.cullingMask = BuildLayerMask("Ship");
+            shipOverlayCamera.eventMask = 0;
+            shipOverlayCamera.clearFlags = CameraClearFlags.Depth;
+
+            AudioListener shipListener = shipOverlayCamera.GetComponent<AudioListener>();
+            if (shipListener != null)
+            {
+                shipListener.enabled = false;
+            }
+        }
+
+        private void ApplyOrbitMapCamera()
+        {
+            float defaultOrthographicSize = ResolveDefaultOrbitMapOrthographicSize();
+            if (orbitMapOrthographicSize <= 0f)
+            {
+                orbitMapOrthographicSize = defaultOrthographicSize;
+            }
+
+            float orthographicSize = ClampOrbitMapOrthographicSize(smoothedOrbitMapOrthographicSize);
+            smoothedOrbitMapOrthographicSize = orthographicSize;
+
+            Vector3 center = ResolveOrbitMapFocusPosition(orthographicSize);
+            float fieldOfView = Mathf.Clamp(orbitMapFieldOfView, 15f, 80f);
+            float distance = ResolvePerspectiveDistanceForViewSize(orthographicSize, fieldOfView);
+            Quaternion orbitRotation = Quaternion.Euler(smoothedOrbitMapPitchDegrees, smoothedOrbitMapYawDegrees, 0f);
+            Vector3 viewOffset = orbitRotation * Vector3.back;
+            if (!IsUsableDirection(viewOffset))
+            {
+                viewOffset = Vector3.back;
+            }
+
+            Vector3 cameraPosition = center + (viewOffset.normalized * distance);
+            Quaternion cameraRotation = CreateSafeLookRotation(
+                center - cameraPosition,
+                orbitRotation * Vector3.up,
+                celestialCamera.transform.rotation);
+
+            ApplyCameraPose(cameraPosition, cameraRotation);
+
+            celestialCamera.orthographic = false;
+            celestialCamera.fieldOfView = fieldOfView;
+            float focusedRadiusUnits = MetersToVisualUnitsFloat(ResolveReferenceRadius(orbitMapFocusTarget));
+            float focusSurfaceDistance = Mathf.Max(0f, distance - focusedRadiusUnits);
+            celestialCamera.nearClipPlane = ResolveCameraNearClipPlane(focusSurfaceDistance);
+            celestialCamera.farClipPlane = Mathf.Max(
+                ResolveRequiredCelestialFarClipPlane(cameraPosition),
+                distance + (ResolveOrbitMapRadiusUnits() * 4f) + (orthographicSize * 8f));
+        }
+
+        private void ApplyShipFocusCamera()
+        {
+            if (ship == null || ship.VisualTransform == null)
+            {
+                ApplyOrbitMapCamera();
+                return;
+            }
+
+            Vector3 target = ship.VisualTransform.position;
+            shipFocusPitchDegrees = Mathf.Clamp(shipFocusPitchDegrees, -85f, 85f);
+            double minDistance = ResolveMinShipFocusDistanceMeters();
+            double maxDistance = ResolveMaxShipFocusDistanceMeters(minDistance);
+            shipFocusDistanceMeters = Clamp(shipFocusDistanceMeters, minDistance, maxDistance);
+
+            Quaternion orbitRotation = Quaternion.Euler(smoothedShipFocusPitchDegrees, smoothedShipFocusYawDegrees, 0f);
+            Vector3 cameraBack = orbitRotation * Vector3.back;
+            Vector3 cameraUp = orbitRotation * Vector3.up;
+            if (!IsUsableDirection(cameraBack))
+            {
+                cameraBack = Vector3.back;
+            }
+
+            if (!IsUsableDirection(cameraUp))
+            {
+                cameraUp = Vector3.up;
+            }
+
+            double stableDistanceMeters = Math.Max(ResolveMinShipFocusDistanceMeters(), smoothedShipFocusDistanceMeters);
+            float distance = Mathf.Max(1e-9f, MetersToVisualUnitsFloat(stableDistanceMeters));
+            float height = Mathf.Max(0f, MetersToVisualUnitsFloat(shipFocusHeightMeters));
+            Vector3 cameraPosition = target + (cameraBack.normalized * distance) + (cameraUp.normalized * height);
+            Vector3 lookDirection = target - cameraPosition;
+
+            if (!IsUsableDirection(lookDirection))
+            {
+                cameraPosition = target + (Vector3.back * distance);
+                lookDirection = target - cameraPosition;
+                cameraUp = Vector3.up;
+            }
+
+            Quaternion cameraRotation = CreateSafeLookRotation(
+                lookDirection,
+                cameraUp,
+                celestialCamera.transform.rotation);
+            ApplyCameraPose(cameraPosition, cameraRotation);
+
+            celestialCamera.orthographic = false;
+            celestialCamera.fieldOfView = shipFocusFieldOfView;
+            celestialCamera.nearClipPlane = ResolveCameraNearClipPlane(
+                ResolveNearestCelestialSurfaceDistanceUnits(cameraPosition));
+            celestialCamera.farClipPlane = ResolveRequiredCelestialFarClipPlane(cameraPosition);
+
+            if (shipOverlayCamera != null)
+            {
+                shipOverlayCamera.orthographic = false;
+                shipOverlayCamera.fieldOfView = shipFocusFieldOfView;
+                shipOverlayCamera.nearClipPlane = Mathf.Max(0.000000001f, MetersToVisualUnitsFloat(0.01d));
+                shipOverlayCamera.farClipPlane = Mathf.Max(
+                    MetersToVisualUnitsFloat(1000d),
+                    MetersToVisualUnitsFloat(ship.VisualRadiusMeters * 8d));
+            }
+        }
+
+        private void ApplyCameraPose(Vector3 position, Quaternion rotation)
+        {
+            celestialCamera.transform.SetPositionAndRotation(position, rotation);
+
+            if (shipOverlayCamera != null)
+            {
+                shipOverlayCamera.transform.SetPositionAndRotation(position, rotation);
+            }
+        }
+
+        private float ResolveDefaultOrbitMapOrthographicSize()
+        {
+            return Mathf.Max(minOrbitMapOrthographicSize, ResolveOrbitMapRadiusUnits() * orbitMapPadding);
+        }
+
+        private static float ResolvePerspectiveDistanceForViewSize(float halfHeight, float fieldOfView)
+        {
+            float fovRadians = Mathf.Deg2Rad * Mathf.Clamp(fieldOfView, 1f, 120f);
+            float tangent = Mathf.Tan(fovRadians * 0.5f);
+            if (tangent <= 0.0001f)
+            {
+                return Mathf.Max(halfHeight, 10f);
+            }
+
+            return Mathf.Max(halfHeight / tangent, 10f);
+        }
+
+        private Vector3 ResolveOrbitMapFocusPosition(float viewHalfHeight)
+        {
+            if (TryGetReferenceStateAtTime(
+                orbitMapFocusTarget,
+                simulationTimeSeconds,
+                out _,
+                out Vector3d focusPosition,
+                out _,
+                out _,
+                out _,
+                out _))
+            {
+                Vector3 focusWorld = ToUnityPosition(focusPosition);
+                if (orbitMapFocusTarget != ReferenceFrameTarget.Jupiter)
+                {
+                    Vector3 jupiterWorld = jupiterTransform != null
+                        ? jupiterTransform.position
+                        : ToUnityPosition(jupiterRealPosition);
+                    float focusDistance = Vector3.Distance(focusWorld, jupiterWorld);
+                    if (focusDistance > 0.001f)
+                    {
+                        float t = Mathf.InverseLerp(focusDistance * 0.35f, focusDistance * 1.15f, viewHalfHeight);
+                        return Vector3.Lerp(focusWorld, jupiterWorld, Mathf.Clamp01(t));
+                    }
+                }
+
+                return focusWorld;
+            }
+
+            return jupiterTransform != null ? jupiterTransform.position : ToUnityPosition(jupiterRealPosition);
+        }
+
+        private float ClampOrbitMapOrthographicSize(float size)
+        {
+            float defaultSize = ResolveDefaultOrbitMapOrthographicSize();
+            float minSize = ResolveMinOrbitMapViewHalfHeight();
+            float maxSize = Mathf.Max(defaultSize * Mathf.Max(1f, maxOrbitMapZoomMultiplier), minSize * 2f);
+            return Mathf.Clamp(size, minSize, maxSize);
+        }
+
+        private float ResolveMinOrbitMapViewHalfHeight()
+        {
+            float focusedRadiusUnits = MetersToVisualUnitsFloat(ResolveReferenceRadius(orbitMapFocusTarget));
+            float fieldOfView = Mathf.Clamp(orbitMapFieldOfView, 15f, 80f);
+            float surfaceClearanceUnits = MetersToVisualUnitsFloat(
+                ResolveOrbitMapSurfaceClearanceMeters(orbitMapFocusTarget));
+            float minimumCameraDistance = Mathf.Max(0.001f, focusedRadiusUnits + surfaceClearanceUnits);
+            float minimumHalfHeight = minimumCameraDistance * Mathf.Tan(Mathf.Deg2Rad * fieldOfView * 0.5f);
+
+            return Mathf.Max(0.001f, minimumHalfHeight);
+        }
+
+        private float ResolveJupiterRadiusUnits()
+        {
+            double metersPerVisual = GetMetersPerVisualUnit();
+            if (metersPerVisual <= 0d)
+            {
+                return 1f;
+            }
+
+            return (float)Math.Max(1d, jupiterRadius / metersPerVisual);
+        }
+
+        private double ResolveOrbitMapSurfaceClearanceMeters(ReferenceFrameTarget target)
+        {
+            double configuredClearance = orbitMapSurfaceClearanceMeters > 0d
+                ? orbitMapSurfaceClearanceMeters
+                : DefaultOrbitMapSurfaceClearanceMeters;
+            double radiusBasedClearance = ResolveReferenceRadius(target) * OrbitMapSurfaceClearanceRadiusFraction;
+            double preferredClearance = Math.Min(configuredClearance, radiusBasedClearance);
+            return Clamp(
+                preferredClearance,
+                MinimumOrbitMapSurfaceClearanceMeters,
+                MaximumOrbitMapSurfaceClearanceMeters);
+        }
+
+        private double ResolveReferenceRadius(ReferenceFrameTarget target)
+        {
+            if (target == ReferenceFrameTarget.Jupiter)
+            {
+                return Math.Max(1d, jupiterRadius);
+            }
+
+            int moonIndex = FindMoonIndex(target);
+            if (moonIndex >= 0 && moonIndex < moonRails.Count && moonRails[moonIndex] != null)
+            {
+                return Math.Max(1d, moonRails[moonIndex].Radius);
+            }
+
+            return Math.Max(1d, jupiterRadius);
+        }
+
+        private void UpdateOrbitMapMarkers()
+        {
+            EnsureOrbitMapMarkers();
+            bool shouldShow = celestialCamera != null && celestialCamera.enabled;
+            SetOrbitMapMarkersActive(shouldShow);
+
+            if (!shouldShow)
+            {
+                return;
+            }
+
+            UpdateOrbitMapMarker(ReferenceFrameTarget.Jupiter, jupiterRealPosition, jupiterRadius, orbitMapMinJupiterScreenRadius);
+            for (int i = 0; i < moonRails.Count; i++)
+            {
+                MoonRail rail = moonRails[i];
+                if (rail == null)
+                {
+                    continue;
+                }
+
+                ReferenceFrameTarget target = ResolveRailReferenceFrameTarget(i);
+                if (TryGetReferenceStateAtTime(
+                    target,
+                    simulationTimeSeconds,
+                    out _,
+                    out Vector3d moonPosition,
+                    out _,
+                    out _,
+                    out _,
+                    out _))
+                {
+                    UpdateOrbitMapMarker(target, moonPosition, rail.Radius, orbitMapMinMoonScreenRadius);
+                }
+            }
+        }
+
+        private void EnsureOrbitMapMarkers()
+        {
+            Transform visualParent = worldContainer != null ? worldContainer : transform;
+            if (orbitMapMarkerRoot == null)
+            {
+                orbitMapMarkerRoot = FindChildByName(visualParent, "Orbit_Map_Markers");
+                if (orbitMapMarkerRoot == null)
+                {
+                    GameObject rootObject = new GameObject("Orbit_Map_Markers");
+                    orbitMapMarkerRoot = rootObject.transform;
+                    orbitMapMarkerRoot.SetParent(visualParent, false);
+                }
+            }
+            else if (orbitMapMarkerRoot.parent != visualParent)
+            {
+                orbitMapMarkerRoot.SetParent(visualParent, false);
+            }
+
+            foreach (ReferenceFrameTarget target in Enum.GetValues(typeof(ReferenceFrameTarget)))
+            {
+                EnsureOrbitMapMarker(target);
+            }
+        }
+
+        private void EnsureOrbitMapMarker(ReferenceFrameTarget target)
+        {
+            if (orbitMapMarkers.TryGetValue(target, out Transform existingMarker) && existingMarker != null)
+            {
+                return;
+            }
+
+            Transform markerTransform = orbitMapMarkerRoot != null
+                ? FindChildByName(orbitMapMarkerRoot, $"{target}_MapMarker")
+                : null;
+
+            GameObject markerObject;
+            if (markerTransform != null)
+            {
+                markerObject = markerTransform.gameObject;
+            }
+            else
+            {
+                markerObject = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+                markerObject.name = $"{target}_MapMarker";
+                markerObject.transform.SetParent(orbitMapMarkerRoot, false);
+                Collider markerCollider = markerObject.GetComponent<Collider>();
+                if (markerCollider != null)
+                {
+                    Destroy(markerCollider);
+                }
+            }
+
+            int celestialLayer = LayerMask.NameToLayer("Celestial");
+            if (celestialLayer >= 0)
+            {
+                markerObject.layer = celestialLayer;
+            }
+
+            Renderer markerRenderer = markerObject.GetComponent<Renderer>();
+            if (markerRenderer != null)
+            {
+                markerRenderer.sharedMaterial = GetOrCreateOrbitMapMarkerMaterial();
+                markerRenderer.allowOcclusionWhenDynamic = false;
+            }
+
+            orbitMapMarkers[target] = markerObject.transform;
+            orbitMapMarkerRenderers[target] = markerRenderer;
+        }
+
+        private void UpdateOrbitMapMarker(
+            ReferenceFrameTarget target,
+            Vector3d realPosition,
+            double realRadiusMeters,
+            float minScreenRadiusPixels)
+        {
+            if (!orbitMapMarkers.TryGetValue(target, out Transform marker) || marker == null)
+            {
+                return;
+            }
+
+            ApplyVisualPosition(marker, realPosition);
+            float physicalRadiusUnits = MetersToVisualUnitsFloat(realRadiusMeters);
+            Vector3 bodyWorldPosition = marker.position;
+            float distanceAlongView = Vector3.Dot(
+                bodyWorldPosition - celestialCamera.transform.position,
+                celestialCamera.transform.forward);
+            if (distanceAlongView <= celestialCamera.nearClipPlane)
+            {
+                marker.gameObject.SetActive(false);
+                return;
+            }
+
+            float physicalScreenRadius = ResolveScreenRadiusForWorldRadius(bodyWorldPosition, physicalRadiusUnits);
+            if (physicalScreenRadius >= Mathf.Max(1f, minScreenRadiusPixels) * MarkerVisibleScreenRadiusMultiplier)
+            {
+                marker.gameObject.SetActive(false);
+                return;
+            }
+
+            float markerRadiusUnits = Mathf.Max(
+                ResolveWorldRadiusForScreenPixels(bodyWorldPosition, minScreenRadiusPixels),
+                0.001f);
+            Vector3 frontOffset = -celestialCamera.transform.forward * Mathf.Max(
+                physicalRadiusUnits + (markerRadiusUnits * 0.05f),
+                markerRadiusUnits);
+            marker.position = bodyWorldPosition + frontOffset;
+            marker.localScale = Vector3.one * (markerRadiusUnits * 2f);
+            marker.gameObject.SetActive(true);
+
+            if (orbitMapMarkerRenderers.TryGetValue(target, out Renderer markerRenderer) && markerRenderer != null)
+            {
+                ApplyOrbitMapMarkerColor(markerRenderer, target);
+            }
+        }
+
+        private void SetOrbitMapMarkersActive(bool active)
+        {
+            if (orbitMapMarkerRoot != null)
+            {
+                orbitMapMarkerRoot.gameObject.SetActive(active);
+            }
+        }
+
+        private float ResolveCameraNearClipPlane(float nearestSurfaceDistanceUnits)
+        {
+            float minimumNearClip = Mathf.Max(
+                MinimumCameraNearClipPlane,
+                MetersToVisualUnitsFloat(1d));
+
+            if (float.IsNaN(nearestSurfaceDistanceUnits) || float.IsInfinity(nearestSurfaceDistanceUnits))
+            {
+                return minimumNearClip;
+            }
+
+            if (nearestSurfaceDistanceUnits <= 0f)
+            {
+                return minimumNearClip;
+            }
+
+            return Mathf.Clamp(
+                nearestSurfaceDistanceUnits * 0.1f,
+                minimumNearClip,
+                MaximumCelestialNearClipPlane);
+        }
+
+        private float ResolveNearestCelestialSurfaceDistanceUnits(Vector3 cameraPosition)
+        {
+            float nearestDistance = float.PositiveInfinity;
+            IncludeCelestialSurfaceDistance(ref nearestDistance, cameraPosition, jupiterRealPosition, jupiterRadius);
+
+            for (int i = 0; i < moonBodies.Count && i < moonRails.Count; i++)
+            {
+                if (moonBodies[i] == null || moonRails[i] == null)
+                {
+                    continue;
+                }
+
+                IncludeCelestialSurfaceDistance(ref nearestDistance, cameraPosition, moonBodies[i].Position, moonRails[i].Radius);
+            }
+
+            return float.IsInfinity(nearestDistance) ? MetersToVisualUnitsFloat(100d) : nearestDistance;
+        }
+
+        private void IncludeCelestialSurfaceDistance(
+            ref float nearestDistance,
+            Vector3 cameraPosition,
+            Vector3d realPosition,
+            double radiusMeters)
+        {
+            Vector3 bodyPosition = ToUnityPosition(realPosition);
+            if (!IsFinite(bodyPosition))
+            {
+                return;
+            }
+
+            float radiusUnits = MetersToVisualUnitsFloat(radiusMeters);
+            float surfaceDistance = Mathf.Max(0f, Vector3.Distance(cameraPosition, bodyPosition) - radiusUnits);
+            nearestDistance = Mathf.Min(nearestDistance, surfaceDistance);
+        }
+
+        private float ResolveRequiredCelestialFarClipPlane(Vector3 cameraPosition)
+        {
+            float farClip = 1000f;
+            IncludeCelestialFarClipDistance(ref farClip, cameraPosition, jupiterRealPosition, jupiterRadius);
+
+            for (int i = 0; i < moonBodies.Count && i < moonRails.Count; i++)
+            {
+                if (moonBodies[i] == null || moonRails[i] == null)
+                {
+                    continue;
+                }
+
+                IncludeCelestialFarClipDistance(ref farClip, cameraPosition, moonBodies[i].Position, moonRails[i].Radius);
+            }
+
+            return Mathf.Clamp(farClip * 1.25f, 1000f, 100000f);
+        }
+
+        private void IncludeCelestialFarClipDistance(
+            ref float farClip,
+            Vector3 cameraPosition,
+            Vector3d realPosition,
+            double radiusMeters)
+        {
+            Vector3 bodyPosition = ToUnityPosition(realPosition);
+            if (!IsFinite(bodyPosition))
+            {
+                return;
+            }
+
+            float radiusUnits = MetersToVisualUnitsFloat(radiusMeters);
+            farClip = Mathf.Max(farClip, Vector3.Distance(cameraPosition, bodyPosition) + radiusUnits);
+        }
+
+        private float ResolveWorldRadiusForScreenPixels(Vector3 worldPosition, float screenPixels)
+        {
+            if (celestialCamera == null)
+            {
+                return 0f;
+            }
+
+            float pixelHeight = Mathf.Max(1f, celestialCamera.pixelHeight);
+            float clampedPixels = Mathf.Max(1f, screenPixels);
+            if (celestialCamera.orthographic)
+            {
+                return ((celestialCamera.orthographicSize * 2f) / pixelHeight) * clampedPixels;
+            }
+
+            float distanceAlongView = Vector3.Dot(
+                worldPosition - celestialCamera.transform.position,
+                celestialCamera.transform.forward);
+            if (distanceAlongView <= celestialCamera.nearClipPlane)
+            {
+                return 0f;
+            }
+
+            float fovRadians = Mathf.Deg2Rad * Mathf.Clamp(celestialCamera.fieldOfView, 1f, 120f);
+            float worldHeight = 2f * Mathf.Max(0.001f, distanceAlongView) * Mathf.Tan(fovRadians * 0.5f);
+            return (worldHeight / pixelHeight) * clampedPixels;
+        }
+
+        private float ResolveScreenRadiusForWorldRadius(Vector3 worldPosition, float worldRadius)
+        {
+            if (celestialCamera == null || worldRadius <= 0f)
+            {
+                return 0f;
+            }
+
+            float pixelHeight = Mathf.Max(1f, celestialCamera.pixelHeight);
+            if (celestialCamera.orthographic)
+            {
+                float pixelsPerWorldUnit = pixelHeight / Mathf.Max(0.001f, celestialCamera.orthographicSize * 2f);
+                return worldRadius * pixelsPerWorldUnit;
+            }
+
+            float distanceAlongView = Vector3.Dot(
+                worldPosition - celestialCamera.transform.position,
+                celestialCamera.transform.forward);
+            if (distanceAlongView <= celestialCamera.nearClipPlane)
+            {
+                return 0f;
+            }
+
+            float fovRadians = Mathf.Deg2Rad * Mathf.Clamp(celestialCamera.fieldOfView, 1f, 120f);
+            float worldHeight = 2f * Mathf.Max(0.001f, distanceAlongView) * Mathf.Tan(fovRadians * 0.5f);
+            float perspectivePixelsPerWorldUnit = pixelHeight / Mathf.Max(0.001f, worldHeight);
+            return worldRadius * perspectivePixelsPerWorldUnit;
+        }
+
+        private void ApplyOrbitMapMarkerColor(Renderer markerRenderer, ReferenceFrameTarget target)
+        {
+            Color color = ResolveOrbitMapMarkerColor(target);
+            MaterialPropertyBlock propertyBlock = new MaterialPropertyBlock();
+            markerRenderer.GetPropertyBlock(propertyBlock);
+            propertyBlock.SetColor("_Color", color);
+            propertyBlock.SetColor("_BaseColor", color);
+            markerRenderer.SetPropertyBlock(propertyBlock);
+        }
+
+        private static Color ResolveOrbitMapMarkerColor(ReferenceFrameTarget target)
+        {
+            switch (target)
+            {
+                case ReferenceFrameTarget.Jupiter:
+                    return new Color(1f, 0.78f, 0.48f, 1f);
+                case ReferenceFrameTarget.Io:
+                    return new Color(1f, 0.9f, 0.45f, 1f);
+                case ReferenceFrameTarget.Europa:
+                    return new Color(0.82f, 0.92f, 1f, 1f);
+                case ReferenceFrameTarget.Ganymede:
+                    return new Color(0.7f, 0.72f, 0.68f, 1f);
+                case ReferenceFrameTarget.Callisto:
+                    return new Color(0.62f, 0.5f, 0.42f, 1f);
+                default:
+                    return Color.white;
+            }
+        }
+
+        private double ResolveMinShipFocusDistanceMeters()
+        {
+            double visualRadius = ship != null ? Math.Max(0d, ship.VisualRadiusMeters) : 0d;
+            double surfaceClearance = visualRadius > 0d ? Math.Max(0.35d, visualRadius * 0.15d) : 0d;
+            return Math.Max(minShipFocusDistanceMeters, visualRadius + surfaceClearance);
+        }
+
+        private double ResolveMaxShipFocusDistanceMeters(double minDistance)
+        {
+            return Math.Max(maxShipFocusDistanceMeters, minDistance * 2d);
+        }
+
+        private float ResolveOrbitMapRadiusUnits()
+        {
+            EnsureInitialized();
+
+            double radiusMeters = Math.Max(jupiterRadius, 1d);
+            for (int i = 0; i < moonRails.Count; i++)
+            {
+                MoonRail rail = moonRails[i];
+                if (rail == null)
+                {
+                    continue;
+                }
+
+                double distanceMeters = i < moonBodies.Count && moonBodies[i] != null
+                    ? (moonBodies[i].Position - jupiterRealPosition).Magnitude
+                    : rail.ResolveSemiMajorAxis() * (1d + rail.ResolveEccentricity());
+
+                radiusMeters = Math.Max(radiusMeters, distanceMeters + Math.Max(rail.Radius, 0d));
+            }
+
+            if (shipBody != null)
+            {
+                radiusMeters = Math.Max(radiusMeters, (shipBody.Position - jupiterRealPosition).Magnitude);
+            }
+
+            double metersPerVisual = GetMetersPerVisualUnit();
+            if (metersPerVisual <= 0d)
+            {
+                return 1f;
+            }
+
+            return (float)Math.Max(1d, radiusMeters / metersPerVisual);
+        }
+
+        private float MetersToVisualUnitsFloat(double meters)
+        {
+            double metersPerVisual = GetMetersPerVisualUnit();
+            if (metersPerVisual <= 0d || double.IsNaN(meters) || double.IsInfinity(meters))
+            {
+                return 0f;
+            }
+
+            double units = Math.Max(0d, meters / metersPerVisual);
+            return (float)Math.Min(units, float.MaxValue);
+        }
+
+        private static int BuildLayerMask(params string[] layerNames)
+        {
+            int mask = 0;
+            for (int i = 0; i < layerNames.Length; i++)
+            {
+                int layer = LayerMask.NameToLayer(layerNames[i]);
+                if (layer >= 0)
+                {
+                    mask |= 1 << layer;
+                }
+            }
+
+            return mask;
+        }
+
+        private static bool IsUsableDirection(Vector3 value)
+        {
+            return IsFinite(value) && value.sqrMagnitude > 1e-18f;
+        }
+
+        private static Quaternion CreateSafeLookRotation(Vector3 forward, Vector3 up, Quaternion fallback)
+        {
+            if (!IsUsableDirection(forward))
+            {
+                return fallback;
+            }
+
+            Vector3 normalizedForward = forward.normalized;
+            Vector3 normalizedUp = IsUsableDirection(up) ? up.normalized : Vector3.up;
+            if (Mathf.Abs(Vector3.Dot(normalizedForward, normalizedUp)) > 0.999f)
+            {
+                normalizedUp = Mathf.Abs(Vector3.Dot(normalizedForward, Vector3.up)) > 0.999f
+                    ? Vector3.forward
+                    : Vector3.up;
+            }
+
+            return Quaternion.LookRotation(normalizedForward, normalizedUp);
         }
 
         private ReferenceFrameTarget ResolveActiveReferenceFrameTarget()
@@ -926,6 +2234,7 @@ namespace Galilego.Physics
             // Apply visual scale for Jupiter and moons based on real radii
             ApplyVisualScale(jupiterTransform, jupiterRadius);
             ApplyVisualPosition(jupiterTransform, jupiterRealPosition);
+            ConfigureCelestialBodyRenderers(jupiterTransform);
 
             int bodyCount = moonBodies != null ? moonBodies.Count : 0;
             int railCount = moonRails != null ? moonRails.Count : 0;
@@ -947,10 +2256,12 @@ namespace Galilego.Physics
 
                 ApplyVisualScale(visual, rail.Radius);
                 ApplyVisualPosition(visual, moonBodies[i].Position);
+                ConfigureCelestialBodyRenderers(visual);
             }
 
-            if (shipBody != null)
+            if (shipBody != null && ship != null)
             {
+                ApplyVisualScale(ship.VisualTransform, ship.VisualRadiusMeters);
                 ApplyVisualPosition(ship.VisualTransform, shipBody.Position);
             }
 
@@ -960,14 +2271,41 @@ namespace Galilego.Physics
             }
         }
 
+        private void ConfigureCelestialBodyRenderers(Transform target)
+        {
+            if (target == null)
+            {
+                return;
+            }
+
+            rendererBuffer.Clear();
+            target.GetComponentsInChildren(true, rendererBuffer);
+            for (int i = 0; i < rendererBuffer.Count; i++)
+            {
+                Renderer bodyRenderer = rendererBuffer[i];
+                if (bodyRenderer != null)
+                {
+                    bodyRenderer.allowOcclusionWhenDynamic = false;
+                }
+            }
+
+            rendererBuffer.Clear();
+        }
+
         private void ApplyFloatingOriginIfNeeded()
         {
+            if (shipBody == null)
+            {
+                return;
+            }
+
             Vector3 shipVisualPosition = ToUnityPosition(shipBody.Position);
+            double activeThreshold = ResolveFloatingOriginThreshold();
 
             bool exceedsThreshold =
-                Math.Abs(shipVisualPosition.x) > floatingOriginThreshold ||
-                Math.Abs(shipVisualPosition.y) > floatingOriginThreshold ||
-                Math.Abs(shipVisualPosition.z) > floatingOriginThreshold;
+                Math.Abs(shipVisualPosition.x) > activeThreshold ||
+                Math.Abs(shipVisualPosition.y) > activeThreshold ||
+                Math.Abs(shipVisualPosition.z) > activeThreshold;
 
             if (!exceedsThreshold)
             {
@@ -979,6 +2317,17 @@ namespace Galilego.Physics
             floatingOriginOffset += realShift;
 
             ShiftLoadedSceneRoots(visualShift);
+        }
+
+        private double ResolveFloatingOriginThreshold()
+        {
+            double threshold = floatingOriginThreshold <= 0d ? 5000d : floatingOriginThreshold;
+            if (cameraMode == SpaceCameraMode.ShipFocus)
+            {
+                threshold = Math.Min(threshold, 1d);
+            }
+
+            return Math.Max(0.001d, threshold);
         }
 
         private static Vector3d RotateOrbitalToWorld(Vector3d vector, double ascendingNode, double inclination, double periapsis)
@@ -1228,6 +2577,14 @@ namespace Galilego.Physics
                 !float.IsNaN(value.z) && !float.IsInfinity(value.z);
         }
 
+        private static bool Approximately(Vector3 left, Vector3 right)
+        {
+            return
+                Mathf.Approximately(left.x, right.x) &&
+                Mathf.Approximately(left.y, right.y) &&
+                Mathf.Approximately(left.z, right.z);
+        }
+
         private void EnsureTrajectoryVisuals()
         {
             Transform visualParent = worldContainer != null ? worldContainer : transform;
@@ -1347,8 +2704,8 @@ namespace Galilego.Physics
                 return;
             }
 
-            moonOrbitRoot.gameObject.SetActive(showMoonOrbits);
-            if (!showMoonOrbits)
+            moonOrbitRoot.gameObject.SetActive(ShouldShowMoonOrbitVisuals());
+            if (!ShouldShowMoonOrbitVisuals())
             {
                 if (jupiterOrbitRenderer != null)
                 {
@@ -1368,7 +2725,7 @@ namespace Galilego.Physics
                 orbitObject.layer = ResolveMoonOrbitLayer(rail);
 
                 LineRenderer orbitRenderer = orbitObject.AddComponent<LineRenderer>();
-                ConfigureLineRenderer(orbitRenderer, moonOrbitColor, moonOrbitWidth, true);
+                ConfigureMoonOrbitRenderer(orbitRenderer, false);
                 moonOrbitRenderers.Add(orbitRenderer);
             }
 
@@ -1386,8 +2743,14 @@ namespace Galilego.Physics
 
         private void RebuildMoonOrbitLines()
         {
-            if (!showMoonOrbits || moonOrbitRoot == null)
+            if (moonOrbitRoot == null)
             {
+                return;
+            }
+
+            if (!ShouldShowMoonOrbitVisuals())
+            {
+                UpdateMoonOrbitVisibility();
                 return;
             }
 
@@ -1420,7 +2783,8 @@ namespace Galilego.Physics
                 MoonRail rail = moonRails[railIndex];
                 LineRenderer orbitRenderer = moonOrbitRenderers[railIndex];
                 ReferenceFrameTarget orbitTarget = ResolveRailReferenceFrameTarget(railIndex);
-                bool shouldRender = orbitTarget != activeFrame;
+                bool isFocusedOrbit = orbitTarget == orbitMapFocusTarget && orbitMapFocusTarget != ReferenceFrameTarget.Jupiter;
+                bool shouldRender = orbitTarget != activeFrame || isFocusedOrbit;
 
                 orbitRenderer.gameObject.name = $"{rail.Name}_Orbit";
                 orbitRenderer.gameObject.layer = ResolveMoonOrbitLayer(rail);
@@ -1432,17 +2796,26 @@ namespace Galilego.Physics
                     continue;
                 }
 
-                bool shouldLoop = activeFrame == ReferenceFrameTarget.Jupiter;
-                ConfigureLineRenderer(orbitRenderer, moonOrbitColor, moonOrbitWidth, shouldLoop);
+                ConfigureMoonOrbitRenderer(orbitRenderer, false);
 
                 double orbitalPeriod = ResolveOrbitPeriodSeconds(rail);
+                int currentSampleIndex = isFocusedOrbit ? ResolveCurrentOrbitSampleIndex(sampleCount) : -1;
 
                 orbitRenderer.positionCount = sampleCount;
                 for (int sampleIndex = 0; sampleIndex < sampleCount; sampleIndex++)
                 {
-                    double orbitFraction = (double)sampleIndex / sampleCount;
-                    double sampleTime = simulationTimeSeconds + (orbitFraction * orbitalPeriod);
+                    double orbitFraction = sampleCount <= 1 ? 0d : (double)sampleIndex / (sampleCount - 1);
+                    double sampleTime = sampleIndex == currentSampleIndex
+                        ? simulationTimeSeconds
+                        : ResolveFadedOrbitSampleTime(orbitalPeriod, orbitFraction);
                     EvaluateMoonState(rail, sampleTime, out Vector3d moonPosition, out _);
+
+                    bool useFixedFocusOrigin = isFocusedOrbit && activeFrame == orbitTarget;
+                    if (useFixedFocusOrigin)
+                    {
+                        orbitRenderer.SetPosition(sampleIndex, ToUnityOffset(moonPosition - currentFramePosition));
+                        continue;
+                    }
 
                     if (!TryGetReferenceStateAtTime(
                         activeFrame,
@@ -1483,7 +2856,7 @@ namespace Galilego.Physics
                 jupiterOrbitRenderer = orbitObject.AddComponent<LineRenderer>();
             }
 
-            ConfigureLineRenderer(jupiterOrbitRenderer, moonOrbitColor, moonOrbitWidth, true);
+            ConfigureMoonOrbitRenderer(jupiterOrbitRenderer, false);
         }
 
         private void RebuildJupiterOrbitLine(ReferenceFrameTarget activeFrame, int sampleCount)
@@ -1503,14 +2876,14 @@ namespace Galilego.Physics
                 return;
             }
 
-            ConfigureLineRenderer(jupiterOrbitRenderer, moonOrbitColor, moonOrbitWidth, true);
+            ConfigureMoonOrbitRenderer(jupiterOrbitRenderer, false);
             double orbitalPeriod = ResolveOrbitPeriodSeconds(activeRail);
 
             jupiterOrbitRenderer.positionCount = sampleCount;
             for (int sampleIndex = 0; sampleIndex < sampleCount; sampleIndex++)
             {
-                double orbitFraction = (double)sampleIndex / sampleCount;
-                double sampleTime = simulationTimeSeconds + (orbitFraction * orbitalPeriod);
+                double orbitFraction = sampleCount <= 1 ? 0d : (double)sampleIndex / (sampleCount - 1);
+                double sampleTime = ResolveFadedOrbitSampleTime(orbitalPeriod, orbitFraction);
 
                 if (!TryGetReferenceStateAtTime(
                     activeFrame,
@@ -1571,6 +2944,157 @@ namespace Galilego.Physics
             double semiMajorAxis = Math.Max(rail.ResolveSemiMajorAxis(), 1d);
             double orbitalMu = jupiterStandardGravitationalParameter + rail.ResolveStandardGravitationalParameter();
             return 2d * Math.PI * Math.Sqrt((semiMajorAxis * semiMajorAxis * semiMajorAxis) / orbitalMu);
+        }
+
+        private void RefreshTrajectoryLineStyles()
+        {
+            if (shipTrajectoryPredictor != null)
+            {
+                LineRenderer shipLineRenderer = shipTrajectoryPredictor.GetComponent<LineRenderer>();
+                ConfigureLineRenderer(shipLineRenderer, shipTrajectoryColor, shipTrajectoryWidth, false);
+            }
+
+            for (int i = 0; i < moonOrbitRenderers.Count; i++)
+            {
+                LineRenderer orbitRenderer = moonOrbitRenderers[i];
+                if (orbitRenderer == null)
+                {
+                    continue;
+                }
+
+                ConfigureMoonOrbitRenderer(orbitRenderer, orbitRenderer.loop);
+            }
+
+            if (jupiterOrbitRenderer != null)
+            {
+                ConfigureMoonOrbitRenderer(jupiterOrbitRenderer, jupiterOrbitRenderer.loop);
+            }
+        }
+
+        private float ResolveMoonOrbitLineWidth()
+        {
+            float worldWidth = Mathf.Max(0.001f, moonOrbitWidth);
+            if (celestialCamera == null)
+            {
+                return worldWidth;
+            }
+
+            if (!celestialCamera.orthographic && cameraMode != SpaceCameraMode.OrbitMap)
+            {
+                return worldWidth;
+            }
+
+            float pixelHeight = Mathf.Max(1f, celestialCamera.pixelHeight);
+            float viewHalfHeight = celestialCamera.orthographic
+                ? celestialCamera.orthographicSize
+                : Mathf.Max(0.001f, smoothedOrbitMapOrthographicSize);
+            float worldUnitsPerPixel = (viewHalfHeight * 2f) / pixelHeight;
+            float screenWidth = worldUnitsPerPixel * Mathf.Max(1f, moonOrbitScreenWidth);
+            return Mathf.Max(worldWidth, screenWidth);
+        }
+
+        private bool ShouldShowMoonOrbitVisuals()
+        {
+            return showMoonOrbits && cameraMode == SpaceCameraMode.OrbitMap;
+        }
+
+        private void UpdateMoonOrbitVisibility()
+        {
+            bool shouldShow = ShouldShowMoonOrbitVisuals();
+            if (moonOrbitRoot != null)
+            {
+                moonOrbitRoot.gameObject.SetActive(shouldShow);
+            }
+
+            if (shouldShow)
+            {
+                for (int i = 0; i < moonOrbitRenderers.Count; i++)
+                {
+                    if (moonOrbitRenderers[i] != null)
+                    {
+                        moonOrbitRenderers[i].gameObject.SetActive(moonOrbitRenderers[i].positionCount > 0);
+                    }
+                }
+
+                if (jupiterOrbitRenderer != null)
+                {
+                    jupiterOrbitRenderer.gameObject.SetActive(jupiterOrbitRenderer.positionCount > 0);
+                }
+
+                return;
+            }
+
+            for (int i = 0; i < moonOrbitRenderers.Count; i++)
+            {
+                if (moonOrbitRenderers[i] != null)
+                {
+                    moonOrbitRenderers[i].gameObject.SetActive(false);
+                }
+            }
+
+            if (jupiterOrbitRenderer != null)
+            {
+                jupiterOrbitRenderer.gameObject.SetActive(false);
+            }
+        }
+
+        private double ResolveFadedOrbitSampleTime(double orbitalPeriod, double orbitFraction)
+        {
+            const double aheadFraction = 0.15d;
+            double clampedFraction = Clamp(orbitFraction, 0d, 1d);
+            return simulationTimeSeconds + ((aheadFraction - clampedFraction) * orbitalPeriod);
+        }
+
+        private static int ResolveCurrentOrbitSampleIndex(int sampleCount)
+        {
+            if (sampleCount <= 1)
+            {
+                return 0;
+            }
+
+            const double aheadFraction = 0.15d;
+            return Mathf.Clamp(
+                Mathf.RoundToInt((float)(aheadFraction * (sampleCount - 1))),
+                0,
+                sampleCount - 1);
+        }
+
+        private void ConfigureMoonOrbitRenderer(LineRenderer lineRenderer, bool loop)
+        {
+            ConfigureLineRenderer(lineRenderer, moonOrbitColor, ResolveMoonOrbitLineWidth(), loop);
+            if (lineRenderer == null)
+            {
+                return;
+            }
+
+            lineRenderer.colorGradient = BuildMoonOrbitFadeGradient();
+        }
+
+        private Gradient BuildMoonOrbitFadeGradient()
+        {
+            Color color = moonOrbitColor;
+            color.a = 1f;
+
+            float maxAlpha = Mathf.Clamp01(moonOrbitColor.a * Mathf.Max(moonOrbitTailAlpha, moonOrbitAheadAlpha));
+            float aheadAlpha = Mathf.Clamp(moonOrbitColor.a * moonOrbitAheadAlpha, 0f, maxAlpha);
+            float oldTrailAlpha = Mathf.Clamp(maxAlpha * 0.35f, aheadAlpha, maxAlpha);
+
+            Gradient gradient = new Gradient();
+            gradient.SetKeys(
+                new[]
+                {
+                    new GradientColorKey(color, 0f),
+                    new GradientColorKey(color, 1f)
+                },
+                new[]
+                {
+                    new GradientAlphaKey(aheadAlpha, 0f),
+                    new GradientAlphaKey(aheadAlpha, 0.14f),
+                    new GradientAlphaKey(maxAlpha, 0.22f),
+                    new GradientAlphaKey(oldTrailAlpha, 1f)
+                });
+
+            return gradient;
         }
 
         private void ConfigureLineRenderer(LineRenderer lineRenderer, Color color, float width, bool loop)
@@ -1635,9 +3159,51 @@ namespace Galilego.Physics
             return runtimeLineMaterial;
         }
 
+        private Material GetOrCreateOrbitMapMarkerMaterial()
+        {
+            if (runtimeOrbitMapMarkerMaterial != null)
+            {
+                return runtimeOrbitMapMarkerMaterial;
+            }
+
+            Shader selectedShader =
+                Shader.Find("Universal Render Pipeline/Unlit") ??
+                Shader.Find("Unlit/Color") ??
+                Shader.Find("Sprites/Default") ??
+                Shader.Find("Standard");
+
+            if (selectedShader == null)
+            {
+                return null;
+            }
+
+            runtimeOrbitMapMarkerMaterial = new Material(selectedShader)
+            {
+                hideFlags = HideFlags.DontSave
+            };
+
+            if (runtimeOrbitMapMarkerMaterial.HasProperty("_BaseColor"))
+            {
+                runtimeOrbitMapMarkerMaterial.SetColor("_BaseColor", Color.white);
+            }
+
+            if (runtimeOrbitMapMarkerMaterial.HasProperty("_Color"))
+            {
+                runtimeOrbitMapMarkerMaterial.SetColor("_Color", Color.white);
+            }
+
+            return runtimeOrbitMapMarkerMaterial;
+        }
+
         private int ResolveShipTrajectoryLayer()
         {
-            return ship.VisualTransform != null
+            int trajectoryLayer = LayerMask.NameToLayer("Trajectory");
+            if (trajectoryLayer >= 0)
+            {
+                return trajectoryLayer;
+            }
+
+            return ship != null && ship.VisualTransform != null
                 ? ship.VisualTransform.gameObject.layer
                 : gameObject.layer;
         }
