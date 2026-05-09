@@ -42,8 +42,11 @@ namespace Galilego.Gameplay
         [Tooltip("Предохранитель от миллионов точек")]
         [SerializeField] private int maxTrajectoryPoints = 5000;
 
-        [Tooltip("Fallback prediction length (seconds) — ограничение на большую длину прогноза")]
+        [Tooltip("Длина прогноза по умолчанию, если FlightPlan.PredictionLengthSeconds не задан")]
         [SerializeField] private double defaultPredictionLengthSeconds = 3600d;
+
+        [Tooltip("Верхняя граница длины прогноза (сек.), согласована с окном планировщика (~30 суток)")]
+        [SerializeField] private double maxPredictionLengthSeconds = 86400d * 30d;
 
         [Tooltip("Максимальное количество точек на один LineRenderer")] 
         [SerializeField] private int maxPointsPerLine = 256;
@@ -101,6 +104,17 @@ namespace Galilego.Gameplay
                 {
                     line.gameObject.SetActive(showLines);
                 }
+
+                if (showLines && line != null && line.positionCount > 1)
+                {
+                    // Keep maneuver trajectory readable at any zoom level (Principia-like feel)
+                    float width = universeManager.ResolveWorldLineWidthForPixels(2.25f, 0.02f);
+                    line.startWidth = width;
+                    line.endWidth = width;
+                    line.alignment = LineAlignment.View;
+                    line.numCornerVertices = 6;
+                    line.numCapVertices = 6;
+                }
             }
 
             if (timeMarkerInstance != null)
@@ -113,8 +127,14 @@ namespace Galilego.Gameplay
         public void MarkAsDirty()
         {
             // Request recalculation via debounce — do not start immediate heavy work
+            // Start the debounce timer only on the first dirty mark so that
+            // subsequent per-frame MarkAsDirty() calls (e.g. while dragging)
+            // don't reset the timer and prevent the debounce from firing.
+            if (!isDirty)
+            {
+                dirtyTimer = 0f;
+            }
             isDirty = true;
-            dirtyTimer = 0f;
         }
 
         public void RequestRecalculation()
@@ -156,9 +176,12 @@ namespace Galilego.Gameplay
             int totalStepsInFrame = 0;
             int chunkFlushCount = 0; // number of chunk flushes performed this coroutine slice
 
-            // Enforce a reasonable maximum prediction length to avoid huge trajectories
+            // Длина нарисованной траектории = горизонт из планировщика (время до конца «будущей» дуги)
             double requestedPrediction = flightPlan != null ? flightPlan.PredictionLengthSeconds : 0d;
-            double effectivePrediction = requestedPrediction > 0d ? Math.Min(requestedPrediction, defaultPredictionLengthSeconds) : defaultPredictionLengthSeconds;
+            double cappedMax = Math.Max(10d, maxPredictionLengthSeconds);
+            double effectivePrediction = requestedPrediction > 0d
+                ? Math.Min(requestedPrediction, cappedMax)
+                : Math.Min(Math.Max(10d, defaultPredictionLengthSeconds), cappedMax);
             double endTime = currentTime + effectivePrediction;
 
             // Safety counter to avoid runaway integration
@@ -397,8 +420,8 @@ namespace Galilego.Gameplay
         {
             if (flightPlan == null || universeManager == null) return;
             
-            // Use UniverseManager's preview absolute time (if set by UI) so marker follows the live-preview
-            double targetTime = universeManager != null ? universeManager.PreviewAbsoluteTime : universeManager.SimulationTimeSeconds + flightPlan.DisplayTimeSeconds;
+            // Конец отрезка траектории = «сейчас» симуляции + горизонт предсказания из планировщика
+            double targetTime = universeManager.TrajectoryPreviewEndTime;
             
             Vector3d pos = Vector3d.Zero;
             bool found = false;
@@ -432,7 +455,7 @@ namespace Galilego.Gameplay
                         timeMarkerInstance.transform.localScale = Vector3.one * 0.5f;
                         timeMarkerInstance.GetComponent<Renderer>().material.color = Color.yellow;
                     }
-                    timeMarkerInstance.layer = 8; // Trajectory
+                    timeMarkerInstance.layer = ResolveTrajectoryLayer();
                 }
                 
                 ReferenceFrameTarget frame = universeManager.ActiveReferenceFrame;
@@ -440,6 +463,13 @@ namespace Galilego.Gameplay
                 {
                     universeManager.ApplyVisualPosition(timeMarkerInstance.transform, framePos);
                     timeMarkerInstance.transform.localPosition = universeManager.ToUnityOffset(pos - framePos);
+                }
+
+                // Keep marker readable at any zoom level (OrbitMap)
+                float markerScale = universeManager.ResolveWorldLineWidthForPixels(5f, 0.01f);
+                if (!float.IsNaN(markerScale) && !float.IsInfinity(markerScale) && markerScale > 0.00001f)
+                {
+                    timeMarkerInstance.transform.localScale = Vector3.one * markerScale;
                 }
             }
         }
@@ -454,9 +484,10 @@ namespace Galilego.Gameplay
                     dashedMaterial.SetColor("_Color", new Color(1, 0.7f, 0, 0.8f));
                     dashedMaterial.SetFloat("_DashSize", 0.5f);
                     dashedMaterial.SetFloat("_GapSize", 0.5f);
+                    dashedMaterial.SetFloat("_Tiling", 30f);
                 }
                 line.material = dashedMaterial;
-                line.textureMode = LineTextureMode.Stretch;
+                line.textureMode = LineTextureMode.Tile;
             }
             else
             {
@@ -475,9 +506,16 @@ namespace Galilego.Gameplay
             {
                 GameObject obj = new GameObject("ManeuverSegment_" + index);
                 obj.transform.SetParent(GetTrajectoryParent());
-                obj.layer = 8; // Trajectory
+                obj.layer = ResolveTrajectoryLayer();
                 var lr = obj.AddComponent<LineRenderer>();
-                lr.useWorldSpace = false; lr.startWidth = 0.15f; lr.endWidth = 0.15f;
+                lr.useWorldSpace = false;
+                lr.startWidth = 0.15f;
+                lr.endWidth = 0.15f;
+                lr.alignment = LineAlignment.View;
+                lr.numCornerVertices = 6;
+                lr.numCapVertices = 6;
+                lr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                lr.receiveShadows = false;
                 segmentLines.Add(lr);
                 return lr;
             }
@@ -571,5 +609,11 @@ namespace Galilego.Gameplay
         }
 
         public FlightPlan GetFlightPlan() => flightPlan;
+
+        private static int ResolveTrajectoryLayer()
+        {
+            int layer = LayerMask.NameToLayer("Trajectory");
+            return layer >= 0 ? layer : 0;
+        }
     }
 }

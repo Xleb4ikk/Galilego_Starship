@@ -5,6 +5,7 @@ Shader "Custom/DashedLine"
         _Color ("Color", Color) = (1,1,1,1)
         _DashSize ("Dash Size", Float) = 1
         _GapSize ("Gap Size", Float) = 1
+        _Tiling ("Tiling", Float) = 20
     }
     SubShader
     {
@@ -39,6 +40,7 @@ Shader "Custom/DashedLine"
             float4 _Color;
             float _DashSize;
             float _GapSize;
+            float _Tiling;
 
             Varyings vert (Attributes input)
             {
@@ -52,7 +54,7 @@ Shader "Custom/DashedLine"
             half4 frag (Varyings input) : SV_Target
             {
                 float totalSize = _DashSize + _GapSize;
-                float pos = input.uv.x * 100; // Multiply by some factor for density
+                float pos = input.uv.x * max(0.0001, _Tiling);
                 if (fmod(pos, totalSize) > _DashSize)
                 {
                     discard;

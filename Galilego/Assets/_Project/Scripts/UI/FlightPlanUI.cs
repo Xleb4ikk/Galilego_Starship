@@ -194,7 +194,7 @@ namespace Galilego.Gameplay
                     lastPredTime    = now;
                     predictionDirty = false;
                 }
-                // Publish preview time to UniverseManager for live visuals
+                // Конец отрезка траектории из планировщика (не двигает Юпитер/спутники — только длина линии манёвра и маркер)
                 if (flightPlan != null) universeManager.PreviewTimeOffsetSeconds = flightPlan.PredictionLengthSeconds;
             }
         }
@@ -619,6 +619,21 @@ namespace Galilego.Gameplay
 
             // Custom prediction slider with velocity-drag behavior
             DrawPredictionSlider();
+
+            if (universeManager != null)
+            {
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("Orbit history:", styleLabel, GUILayout.Width(90));
+                float newHist = GUILayout.HorizontalSlider(universeManager.MoonOrbitHistoryFraction, 0f, 1f);
+                if (!Mathf.Approximately(newHist, universeManager.MoonOrbitHistoryFraction))
+                    universeManager.MoonOrbitHistoryFraction = newHist;
+                string histLabel = universeManager.MoonOrbitHistoryFraction < 0.01f
+                    ? "OFF"
+                    : $"{universeManager.MoonOrbitHistoryFraction * 100f:F0}%";
+                GUILayout.Label(histLabel, universeManager.MoonOrbitHistoryFraction < 0.01f
+                    ? styleLabelDim : styleLabelGreen, GUILayout.Width(40));
+                GUILayout.EndHorizontal();
+            }
 
             GUILayout.BeginHorizontal();
             GUILayout.Label("Max rate:", styleLabel, GUILayout.Width(90));
