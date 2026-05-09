@@ -900,7 +900,13 @@ PlayerSettings:
   XboxOneOverrideIdentityName: 
   XboxOneOverrideIdentityPublisher: 
   vrEditorSettings: {}
-  cloudServicesEnabled: {}
+  cloudServicesEnabled:
+    Build: 0
+    Game Performance: 0
+    Legacy Analytics: 0
+    Purchasing: 0
+    UDP: 0
+    Unity Ads: 0
   luminIcon:
     m_Name: 
     m_ModelFolderPath: 
@@ -923,11 +929,11 @@ PlayerSettings:
   activeInputHandler: 1
   windowsGamepadBackendHint: 0
   enableDirectStorage: 0
-  cloudProjectId: 0a174386-bfc5-4701-b390-6318e3307640
+  cloudProjectId: 09a74b89-13fd-4ddd-8e52-8baa903bb897
   framebufferDepthMemorylessMode: 0
   qualitySettingsNames: []
-  projectName: Galilego
-  organizationId: bonni7391
+  projectName: Galilego (1)
+  organizationId: pizdolizi
   cloudEnabled: 0
   legacyClampBlendShapeWeights: 0
   hmiLoadingImage: {fileID: 0}

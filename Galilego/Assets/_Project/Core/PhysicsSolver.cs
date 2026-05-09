@@ -38,7 +38,12 @@ namespace Galilego.Physics
             Vector3d offset = anchorPos - currentPos;
             double sqrDistance = offset.SqrMagnitude;
 
-            if (sqrDistance <= 0d)
+            // Guard against extremely small distances which cause huge accelerations
+            // (can occur when an integrator steps 'through' a massive body). If the
+            // squared distance is smaller than a safe floor, return zero acceleration
+            // to avoid NaN/Inf propagation. Floor: 10 meters -> 100 m^2.
+            const double MinSqrDistance = 100.0d;
+            if (sqrDistance <= 0d || sqrDistance < MinSqrDistance)
             {
                 return Vector3d.Zero;
             }

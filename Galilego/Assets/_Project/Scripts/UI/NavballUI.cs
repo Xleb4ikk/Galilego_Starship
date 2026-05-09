@@ -6,6 +6,51 @@ namespace Galilego.Physics
 {
     public sealed class NavballUI : MonoBehaviour
     {
+        public enum NavballDirectionMode
+        {
+            Prograde = 0,
+            Retrograde = 1,
+            RadialOut = 2,
+            RadialIn = 3,
+            Normal = 4,
+            AntiNormal = 5,
+            North = 6,
+            East = 7,
+            South = 8,
+            West = 9,
+            SelectedTarget = 10,
+            AntiSelectedTarget = 11,
+            Body = 12,
+            AntiBody = 13
+        }
+
+        [Serializable]
+        private sealed class DirectionalMarker
+        {
+            [SerializeField] private RectTransform marker;
+            [SerializeField] private TMP_Text label;
+            [SerializeField] private NavballDirectionMode direction = NavballDirectionMode.SelectedTarget;
+            [SerializeField] private ReferenceFrameTarget bodyTarget = ReferenceFrameTarget.Jupiter;
+            [SerializeField] private string labelOverride;
+
+            public RectTransform Marker => marker != null ? marker : label != null ? label.rectTransform : null;
+            public TMP_Text Label => label;
+            public NavballDirectionMode Direction => direction;
+            public ReferenceFrameTarget BodyTarget => bodyTarget;
+            public string LabelOverride => labelOverride;
+        }
+
+        private sealed class AutopilotButtonBinding
+        {
+            public Button Button;
+            public Image Background;
+            public Image Icon;
+            public NavballDirectionMode Direction;
+            public bool IsStopButton;
+        }
+
+        private const int AutopilotButtonCount = 13;
+
         [Header("References")]
         [SerializeField] private UniverseManager universeManager;
         [SerializeField] private Transform shipOrientation;
@@ -26,6 +71,27 @@ namespace Galilego.Physics
         [SerializeField] private RectTransform eastMarker;
         [SerializeField] private RectTransform southMarker;
         [SerializeField] private RectTransform westMarker;
+        [SerializeField] private RectTransform selectedTargetMarker;
+        [SerializeField] private RectTransform antiSelectedTargetMarker;
+        [SerializeField] private TMP_Text selectedTargetLabel;
+        [SerializeField] private TMP_Text antiSelectedTargetLabel;
+        [SerializeField] private DirectionalMarker[] dynamicMarkers = Array.Empty<DirectionalMarker>();
+
+        [Header("Autopilot")]
+        [SerializeField] private NavballAutopilotController autopilot;
+        [SerializeField] private bool createAutopilotButtons = true;
+        [SerializeField] private RectTransform autopilotButtonsRoot;
+        [SerializeField] private Vector2 autopilotButtonsOffset = new Vector2(-155f, 0f);
+        [SerializeField] private Vector2 autopilotButtonSize = new Vector2(36f, 36f);
+        [SerializeField] private int autopilotButtonColumns = 2;
+        [SerializeField] private Color autopilotButtonColor = new Color(0.08f, 0.09f, 0.1f, 0.88f);
+        [SerializeField] private Color autopilotActiveButtonColor = new Color(0.1f, 0.58f, 0.72f, 0.95f);
+        [SerializeField] private Color autopilotStopButtonColor = new Color(0.28f, 0.08f, 0.08f, 0.9f);
+
+        [Header("Autopilot UI Style")]
+        [SerializeField] private Sprite autopilotButtonBackground;
+        [SerializeField] private Sprite autopilotStopIcon;
+        [SerializeField] private float autopilotIconScale = 0.85f;
 
         [Header("Display")]
         [SerializeField] private float markerRadius = 82f;
@@ -368,6 +434,341 @@ namespace Galilego.Physics
             {
                 frameGraphic = GetComponentInChildren<NavballFrameGraphic>(true);
             }
+
+            if (autopilot == null)
+            {
+                autopilot = GetComponent<NavballAutopilotController>();
+                if (autopilot == null)
+                {
+                    autopilot = FindAnyObjectByType<NavballAutopilotController>();
+                }
+            }
+
+            ResolveMarkerReferences();
+        }
+
+        private void EnsureAutopilotButtons()
+        {
+            if (!createAutopilotButtons || autopilotButtonsCreated)
+            {
+                return;
+            }
+
+            if (autopilot == null)
+            {
+                autopilot = gameObject.AddComponent<NavballAutopilotController>();
+            }
+
+            if (autopilotButtonsRoot == null)
+            {
+                autopilotButtonsRoot = CreateAutopilotButtonsRoot();
+            }
+
+            if (autopilotButtonsRoot == null)
+            {
+                return;
+            }
+
+            autopilotButtonsCreated = true;
+            autopilotButtonBindings.Clear();
+
+            CreateAutopilotButton(NavballDirectionMode.Prograde);
+            CreateAutopilotButton(NavballDirectionMode.Retrograde);
+            CreateAutopilotButton(NavballDirectionMode.RadialIn);
+            CreateAutopilotButton(NavballDirectionMode.RadialOut);
+            CreateAutopilotButton(NavballDirectionMode.SelectedTarget);
+            CreateAutopilotButton(NavballDirectionMode.AntiSelectedTarget);
+            CreateAutopilotButton(NavballDirectionMode.Normal);
+            CreateAutopilotButton(NavballDirectionMode.AntiNormal);
+            CreateAutopilotButton(NavballDirectionMode.North);
+            CreateAutopilotButton(NavballDirectionMode.East);
+            CreateAutopilotButton(NavballDirectionMode.South);
+            CreateAutopilotButton(NavballDirectionMode.West);
+            CreateAutopilotStopButton();
+        }
+
+        private RectTransform CreateAutopilotButtonsRoot()
+        {
+            GameObject rootObject = new GameObject("AutopilotButtons", typeof(RectTransform), typeof(GridLayoutGroup));
+            rootObject.transform.SetParent(transform, false);
+
+            RectTransform root = rootObject.GetComponent<RectTransform>();
+            root.anchorMin = new Vector2(0.5f, 0.5f);
+            root.anchorMax = new Vector2(0.5f, 0.5f);
+            root.pivot = new Vector2(1f, 0.5f); // Pivot to the right side of the root, so it grows left if needed
+            root.anchoredPosition = autopilotButtonsOffset;
+
+            GridLayoutGroup grid = rootObject.GetComponent<GridLayoutGroup>();
+            grid.cellSize = autopilotButtonSize;
+            grid.spacing = new Vector2(6f, 6f);
+            grid.constraint = GridLayoutGroup.Constraint.FixedColumnCount;
+            grid.constraintCount = Mathf.Max(1, autopilotButtonColumns);
+            grid.childAlignment = TextAnchor.MiddleRight;
+
+            int columns = Mathf.Max(1, autopilotButtonColumns);
+            int rows = Mathf.CeilToInt(AutopilotButtonCount / (float)columns);
+            root.sizeDelta = new Vector2(
+                (autopilotButtonSize.x * columns) + (grid.spacing.x * (columns - 1)),
+                (autopilotButtonSize.y * rows) + (grid.spacing.y * (rows - 1)));
+
+            return root;
+        }
+
+        private void CreateAutopilotButton(NavballDirectionMode direction)
+        {
+            Sprite icon = GetDirectionSprite(direction);
+            Button button = CreateAutopilotButtonObject(direction.ToString(), icon, autopilotButtonColor, out Image background, out Image iconImage);
+            
+            NavballDirectionMode capturedDirection = direction;
+            button.onClick.AddListener(() =>
+            {
+                if (autopilot != null)
+                {
+                    autopilot.SetHoldDirection(capturedDirection);
+                    RefreshAutopilotButtons();
+                }
+            });
+
+            autopilotButtonBindings.Add(new AutopilotButtonBinding
+            {
+                Button = button,
+                Background = background,
+                Icon = iconImage,
+                Direction = direction,
+                IsStopButton = false
+            });
+        }
+
+        private void CreateAutopilotStopButton()
+        {
+            Button button = CreateAutopilotButtonObject("OFF", autopilotStopIcon, autopilotStopButtonColor, out Image background, out Image iconImage);
+            button.onClick.AddListener(() =>
+            {
+                if (autopilot != null)
+                {
+                    autopilot.StopHold();
+                    RefreshAutopilotButtons();
+                }
+            });
+
+            autopilotButtonBindings.Add(new AutopilotButtonBinding
+            {
+                Button = button,
+                Background = background,
+                Icon = iconImage,
+                IsStopButton = true
+            });
+        }
+
+        private Button CreateAutopilotButtonObject(string name, Sprite icon, Color backgroundColor, out Image background, out Image iconImage)
+        {
+            GameObject buttonObject = new GameObject(name, typeof(RectTransform), typeof(CanvasRenderer), typeof(Image), typeof(Button));
+            buttonObject.transform.SetParent(autopilotButtonsRoot, false);
+
+            RectTransform rectTransform = buttonObject.GetComponent<RectTransform>();
+            rectTransform.sizeDelta = autopilotButtonSize;
+
+            background = buttonObject.GetComponent<Image>();
+            background.sprite = autopilotButtonBackground;
+            background.color = backgroundColor;
+            background.raycastTarget = true;
+
+            Button button = buttonObject.GetComponent<Button>();
+            ColorBlock colors = button.colors;
+            colors.normalColor = Color.white;
+            colors.highlightedColor = new Color(1.15f, 1.15f, 1.15f, 1f);
+            colors.pressedColor = new Color(0.78f, 0.78f, 0.78f, 1f);
+            colors.selectedColor = Color.white;
+            colors.disabledColor = new Color(0.45f, 0.45f, 0.45f, 0.6f);
+            colors.colorMultiplier = 1f;
+            button.colors = colors;
+
+            iconImage = null;
+            if (icon != null)
+            {
+                GameObject iconObject = new GameObject("Icon", typeof(RectTransform), typeof(CanvasRenderer), typeof(Image));
+                iconObject.transform.SetParent(buttonObject.transform, false);
+
+                RectTransform iconTransform = iconObject.GetComponent<RectTransform>();
+                iconTransform.anchorMin = Vector2.zero;
+                iconTransform.anchorMax = Vector2.one;
+                iconTransform.offsetMin = Vector2.zero;
+                iconTransform.offsetMax = Vector2.zero;
+                iconTransform.localScale = Vector3.one * autopilotIconScale;
+
+                iconImage = iconObject.GetComponent<Image>();
+                iconImage.sprite = icon;
+                iconImage.raycastTarget = false;
+            }
+            else
+            {
+                // Fallback to text if no icon
+                GameObject textObject = new GameObject("Label", typeof(RectTransform), typeof(CanvasRenderer), typeof(TextMeshProUGUI));
+                textObject.transform.SetParent(buttonObject.transform, false);
+
+                RectTransform textTransform = textObject.GetComponent<RectTransform>();
+                textTransform.anchorMin = Vector2.zero;
+                textTransform.anchorMax = Vector2.one;
+                textTransform.offsetMin = Vector2.zero;
+                textTransform.offsetMax = Vector2.zero;
+
+                TextMeshProUGUI text = textObject.GetComponent<TextMeshProUGUI>();
+                text.text = name.Length > 3 ? name.Substring(0, 3) : name;
+                text.fontSize = 10f;
+                text.enableAutoSizing = true;
+                text.fontSizeMin = 6f;
+                text.fontSizeMax = 10f;
+                text.alignment = TextAlignmentOptions.Center;
+                text.color = Color.white;
+                text.raycastTarget = false;
+            }
+
+            return button;
+        }
+
+        private Sprite GetDirectionSprite(NavballDirectionMode mode)
+        {
+            RectTransform marker = null;
+            switch (mode)
+            {
+                case NavballDirectionMode.Prograde: marker = progradeMarker; break;
+                case NavballDirectionMode.Retrograde: marker = retrogradeMarker; break;
+                case NavballDirectionMode.RadialOut: marker = radialOutMarker; break;
+                case NavballDirectionMode.RadialIn: marker = radialInMarker; break;
+                case NavballDirectionMode.Normal: marker = normalMarker; break;
+                case NavballDirectionMode.AntiNormal: marker = antiNormalMarker; break;
+                case NavballDirectionMode.North: marker = northMarker; break;
+                case NavballDirectionMode.East: marker = eastMarker; break;
+                case NavballDirectionMode.South: marker = southMarker; break;
+                case NavballDirectionMode.West: marker = westMarker; break;
+                case NavballDirectionMode.SelectedTarget: marker = selectedTargetMarker; break;
+                case NavballDirectionMode.AntiSelectedTarget: marker = antiSelectedTargetMarker; break;
+            }
+
+            if (marker != null)
+            {
+                Image img = marker.GetComponent<Image>();
+                if (img == null) img = marker.GetComponentInChildren<Image>();
+                if (img != null) return img.sprite;
+            }
+
+            return null;
+        }
+
+        private void RefreshAutopilotButtons()
+        {
+            if (autopilotButtonBindings.Count == 0)
+            {
+                return;
+            }
+
+            bool isHolding = autopilot != null && autopilot.IsHolding;
+            NavballDirectionMode activeDirection = autopilot != null ? autopilot.HoldDirection : NavballDirectionMode.Prograde;
+
+            for (int i = 0; i < autopilotButtonBindings.Count; i++)
+            {
+                AutopilotButtonBinding binding = autopilotButtonBindings[i];
+                if (binding == null || binding.Background == null)
+                {
+                    continue;
+                }
+
+                if (binding.IsStopButton)
+                {
+                    binding.Background.color = isHolding ? autopilotStopButtonColor : autopilotButtonColor;
+                    continue;
+                }
+
+                binding.Background.color = isHolding && binding.Direction == activeDirection
+                    ? autopilotActiveButtonColor
+                    : autopilotButtonColor;
+            }
+        }
+
+        private void ResolveMarkerReferences()
+        {
+            if (northMarker == null)
+            {
+                northMarker = FindChildRectTransformByName("North", "N", "NorthMarker", "NavballNorth");
+            }
+
+            if (eastMarker == null)
+            {
+                eastMarker = FindChildRectTransformByName("East", "E", "EastMarker", "NavballEast");
+            }
+
+            if (southMarker == null)
+            {
+                southMarker = FindChildRectTransformByName("South", "S", "SouthMarker", "NavballSouth");
+            }
+
+            if (westMarker == null)
+            {
+                westMarker = FindChildRectTransformByName("West", "W", "WestMarker", "NavballWest");
+            }
+
+            if (selectedTargetMarker == null)
+            {
+                selectedTargetMarker = FindChildRectTransformByName(
+                    "Target",
+                    "SelectedTarget",
+                    "ReferenceTarget",
+                    "FrameTarget",
+                    "BodyTarget");
+            }
+
+            if (antiSelectedTargetMarker == null)
+            {
+                antiSelectedTargetMarker = FindChildRectTransformByName(
+                    "AntiTarget",
+                    "AntiSelectedTarget",
+                    "AntiReferenceTarget",
+                    "AntiFrameTarget",
+                    "AntiBodyTarget");
+            }
+
+            if (selectedTargetLabel == null)
+            {
+                selectedTargetLabel = FindTextOnMarker(selectedTargetMarker);
+            }
+
+            if (antiSelectedTargetLabel == null)
+            {
+                antiSelectedTargetLabel = FindTextOnMarker(antiSelectedTargetMarker);
+            }
+        }
+
+        private RectTransform FindChildRectTransformByName(params string[] names)
+        {
+            if (names == null || names.Length == 0)
+            {
+                return null;
+            }
+
+            RectTransform[] rectTransforms = GetComponentsInChildren<RectTransform>(true);
+            for (int i = 0; i < rectTransforms.Length; i++)
+            {
+                RectTransform rectTransform = rectTransforms[i];
+                if (rectTransform == null || rectTransform == transform)
+                {
+                    continue;
+                }
+
+                for (int nameIndex = 0; nameIndex < names.Length; nameIndex++)
+                {
+                    if (string.Equals(rectTransform.name, names[nameIndex], StringComparison.OrdinalIgnoreCase))
+                    {
+                        return rectTransform;
+                    }
+                }
+            }
+
+            return null;
+        }
+
+        private static TMP_Text FindTextOnMarker(RectTransform marker)
+        {
+            return marker != null ? marker.GetComponentInChildren<TMP_Text>(true) : null;
         }
     }
 }

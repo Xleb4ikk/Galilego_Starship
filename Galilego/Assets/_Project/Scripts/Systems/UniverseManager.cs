@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.InputSystem;
+using Galilego.Gameplay;
 using UnityEngine.SceneManagement;
 
 namespace Galilego.Physics
@@ -49,7 +50,9 @@ namespace Galilego.Physics
         [SerializeField] private Camera celestialCamera;
         [SerializeField] private Camera shipOverlayCamera;
         [SerializeField] private SpaceCameraMode cameraMode = SpaceCameraMode.ShipFocus;
-        [SerializeField] private bool enableCameraToggle = true;
+
+        public SpaceCameraMode CameraMode => cameraMode;
+[SerializeField] private bool enableCameraToggle = true;
         [SerializeField] private double shipFocusDistanceMeters = 24d;
         [SerializeField] private double shipFocusHeightMeters = 8d;
         [SerializeField] private float shipFocusFieldOfView = 45f;
@@ -170,6 +173,12 @@ namespace Galilego.Physics
         public Vector3 AstrodynamicNorthUnityDirection => ToUnityDirection(ConvertAstrodynamicToSimulationFrame(new Vector3d(0d, 0d, 1d)));
         public Vector3 AstrodynamicEastUnityDirection => ToUnityDirection(ConvertAstrodynamicToSimulationFrame(new Vector3d(1d, 0d, 0d)));
 
+        // Preview time offset for UI live-preview (seconds). When non-zero, visuals
+        // and orbit samples will be computed for SimulationTimeSeconds + this offset.
+        private double previewTimeOffsetSeconds = 0d;
+        public double PreviewTimeOffsetSeconds { get => previewTimeOffsetSeconds; set => previewTimeOffsetSeconds = value; }
+        public double PreviewAbsoluteTime => simulationTimeSeconds + previewTimeOffsetSeconds;
+
         private void Awake()
         {
             ResolveCameraReferences();
@@ -196,6 +205,11 @@ namespace Galilego.Physics
 
             double frameDt = Time.fixedDeltaTime * timeScale;
             int stepCount = GetSolverStepCount(frameDt);
+            if (stepCount > 2048)
+            {
+                Debug.LogWarning($"UniverseManager: clamping solver stepCount from {stepCount} to 2048 to avoid long frame/blocking.");
+                stepCount = 2048;
+            }
             double stepDt = frameDt / stepCount;
 
             for (int i = 0; i < stepCount; i++)
@@ -859,6 +873,56 @@ namespace Galilego.Physics
             }
 
             return totalAcceleration;
+        }
+
+        /// <summary>
+        /// Try to compute ship state (position, velocity) at an arbitrary sample time
+        /// by integrating from the current simulation state. Returns false if ship
+        /// is unavailable or integration produced invalid values.
+        /// </summary>
+        public bool TryGetShipStateAtTime(double sampleTimeSeconds, out Vector3d position, out Vector3d velocity)
+        {
+            position = Vector3d.Zero; velocity = Vector3d.Zero;
+            if (shipBody == null)
+            {
+                return false;
+            }
+
+            // Start from current simulated state (do not modify actual shipBody)
+            position = shipBody.Position;
+            velocity = shipBody.Velocity;
+            double currentTime = simulationTimeSeconds;
+
+            double dtTotal = sampleTimeSeconds - currentTime;
+            if (Math.Abs(dtTotal) <= 1e-9) return true;
+
+            double remaining = Math.Abs(dtTotal);
+            double dir = Math.Sign(dtTotal);
+            double majorStep = Math.Max(1e-6d, maxSolverStepSeconds);
+
+            int iterCount = 0;
+            const int iterSafetyLimit = 1000000; // very large cap to avoid runaway
+
+            while (remaining > 0d)
+            {
+                double step = Math.Min(remaining, majorStep) * dir;
+                var res = PhysicsSolver.RK4(position, velocity, currentTime, step, EvaluateShipAcceleration);
+                position = res.Position; velocity = res.Velocity; currentTime += step; remaining -= Math.Abs(step);
+
+                iterCount++;
+                if (iterCount > iterSafetyLimit)
+                {
+                    Debug.LogError($"UniverseManager: TryGetShipStateAtTime aborted — exceeded iteration safety limit ({iterSafetyLimit}). sampleTimeSeconds={sampleTimeSeconds}");
+                    return false;
+                }
+
+                if (!position.IsFinite || !velocity.IsFinite)
+                {
+                    return false;
+                }
+            }
+
+            return true;
         }
 
         private void DrawTelemetryWindow(int windowId)
@@ -2214,22 +2278,29 @@ namespace Galilego.Physics
 
         private Vector3d ResolveActiveReferenceVisualPosition()
         {
-            return TryGetReferenceState(
+            double previewTime = PreviewAbsoluteTime;
+            if (TryGetReferenceStateAtTime(
                 ResolveActiveReferenceFrameTarget(),
+                previewTime,
                 out _,
                 out Vector3d framePosition,
                 out _,
                 out _,
                 out _,
-                out _)
-                ? framePosition
-                : jupiterRealPosition;
+                out _))
+            {
+                return framePosition;
+            }
+
+            return jupiterRealPosition;
         }
 
         private void SyncAllVisuals()
         {
             // Ensure the runtime bodies are initialized and lists are in sync before applying visuals.
             EnsureInitialized();
+            // Compute preview time (simulation + UI offset). When offset == 0 this is current sim time.
+            double previewTime = PreviewAbsoluteTime;
 
             // Apply visual scale for Jupiter and moons based on real radii
             ApplyVisualScale(jupiterTransform, jupiterRadius);
@@ -2255,19 +2326,46 @@ namespace Galilego.Physics
                 }
 
                 ApplyVisualScale(visual, rail.Radius);
-                ApplyVisualPosition(visual, moonBodies[i].Position);
+
+                // Evaluate moon state at preview time (does not mutate simulation state)
+                EvaluateMoonState(rail, previewTime, out Vector3d moonPos, out Vector3d moonVel);
+                ApplyVisualPosition(visual, moonPos);
+
+                // Use a temporary CelestialBody for rotation calculations so we don't alter simulation state
+                var tempMoon = new CelestialBody(rail.Mass, moonPos, moonVel, rail.ResolveStandardGravitationalParameter());
+                ApplyTidallyLockedMoonVisualRotation(rail, visual, tempMoon);
                 ConfigureCelestialBodyRenderers(visual);
             }
 
             if (shipBody != null && ship != null)
             {
                 ApplyVisualScale(ship.VisualTransform, ship.VisualRadiusMeters);
-                ApplyVisualPosition(ship.VisualTransform, shipBody.Position);
+
+                // Prefer ManeuverEvaluator trajectory (includes planned Δv) if available
+                ManeuverEvaluator evaluator = FindAnyObjectByType<ManeuverEvaluator>();
+                if (evaluator != null && evaluator.TryGetTrajectoryPositionAtTime(previewTime, out Vector3d evalPos))
+                {
+                    ApplyVisualPosition(ship.VisualTransform, evalPos);
+                }
+                else if (TryGetShipStateAtTime(previewTime, out Vector3d shipPos, out Vector3d shipVel))
+                {
+                    ApplyVisualPosition(ship.VisualTransform, shipPos);
+                }
+                else
+                {
+                    ApplyVisualPosition(ship.VisualTransform, shipBody.Position);
+                }
             }
 
             if (moonOrbitRoot != null)
             {
-                ApplyVisualPosition(moonOrbitRoot, ResolveActiveReferenceVisualPosition());
+                // Position the moon orbit root relative to the active reference at preview time
+                if (!TryGetReferenceStateAtTime(ResolveActiveReferenceFrameTarget(), previewTime,
+                    out _, out Vector3d framePos, out _, out _, out _, out _))
+                {
+                    framePos = jupiterRealPosition;
+                }
+                ApplyVisualPosition(moonOrbitRoot, framePos);
             }
         }
 
@@ -2755,9 +2853,10 @@ namespace Galilego.Physics
             }
 
             ReferenceFrameTarget activeFrame = ResolveActiveReferenceFrameTarget();
+            double previewTime = PreviewAbsoluteTime;
             if (!TryGetReferenceStateAtTime(
                 activeFrame,
-                simulationTimeSeconds,
+                previewTime,
                 out _,
                 out Vector3d currentFramePosition,
                 out _,
@@ -2806,7 +2905,7 @@ namespace Galilego.Physics
                 {
                     double orbitFraction = sampleCount <= 1 ? 0d : (double)sampleIndex / (sampleCount - 1);
                     double sampleTime = sampleIndex == currentSampleIndex
-                        ? simulationTimeSeconds
+                        ? previewTime
                         : ResolveFadedOrbitSampleTime(orbitalPeriod, orbitFraction);
                     EvaluateMoonState(rail, sampleTime, out Vector3d moonPosition, out _);
 
@@ -2973,9 +3072,9 @@ namespace Galilego.Physics
 
         private float ResolveMoonOrbitLineWidth()
         {
-            float worldWidth = Mathf.Max(0.001f, moonOrbitWidth);
+            float worldWidth = Mathf.Max(0.001f, moonOrbitWidth * 1.5f); // Increase width slightly
             if (celestialCamera == null)
-            {
+{
                 return worldWidth;
             }
 
@@ -3042,7 +3141,7 @@ namespace Galilego.Physics
         {
             const double aheadFraction = 0.15d;
             double clampedFraction = Clamp(orbitFraction, 0d, 1d);
-            return simulationTimeSeconds + ((aheadFraction - clampedFraction) * orbitalPeriod);
+            return PreviewAbsoluteTime + ((aheadFraction - clampedFraction) * orbitalPeriod);
         }
 
         private static int ResolveCurrentOrbitSampleIndex(int sampleCount)
@@ -3075,23 +3174,19 @@ namespace Galilego.Physics
             Color color = moonOrbitColor;
             color.a = 1f;
 
-            float maxAlpha = Mathf.Clamp01(moonOrbitColor.a * Mathf.Max(moonOrbitTailAlpha, moonOrbitAheadAlpha));
-            float aheadAlpha = Mathf.Clamp(moonOrbitColor.a * moonOrbitAheadAlpha, 0f, maxAlpha);
-            float oldTrailAlpha = Mathf.Clamp(maxAlpha * 0.35f, aheadAlpha, maxAlpha);
-
             Gradient gradient = new Gradient();
             gradient.SetKeys(
                 new[]
                 {
-                    new GradientColorKey(color, 0f),
-                    new GradientColorKey(color, 1f)
+                    new GradientColorKey(color * 0.5f, 0f),
+                    new GradientColorKey(color, 0.8f),
+                    new GradientColorKey(Color.white, 1f) // Glow effect at the head
                 },
                 new[]
                 {
-                    new GradientAlphaKey(aheadAlpha, 0f),
-                    new GradientAlphaKey(aheadAlpha, 0.14f),
-                    new GradientAlphaKey(maxAlpha, 0.22f),
-                    new GradientAlphaKey(oldTrailAlpha, 1f)
+                    new GradientAlphaKey(0f, 0f),
+                    new GradientAlphaKey(moonOrbitColor.a * 0.5f, 0.5f),
+                    new GradientAlphaKey(moonOrbitColor.a, 1f)
                 });
 
             return gradient;
