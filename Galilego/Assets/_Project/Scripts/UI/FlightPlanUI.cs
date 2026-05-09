@@ -111,6 +111,40 @@ namespace Galilego.Gameplay
                 sliderHotId = -1;
             }
 
+            // Toggle planner window visibility with the configured key
+#if ENABLE_INPUT_SYSTEM && !ENABLE_LEGACY_INPUT_MANAGER
+            if (Keyboard.current != null)
+            {
+                // Try direct enum name match (works for letter keys like 'N')
+                if (Enum.TryParse<UnityEngine.InputSystem.Key>(toggleKey.ToString(), out var parsedKey))
+                {
+                    if (Keyboard.current[parsedKey].wasPressedThisFrame)
+                    {
+                        showWindow = !showWindow;
+                    }
+                }
+                else
+                {
+                    // Handle numeric row keys (KeyCode.Alpha0..Alpha9 -> Key.Digit0..Digit9)
+                    if (toggleKey >= KeyCode.Alpha0 && toggleKey <= KeyCode.Alpha9)
+                    {
+                        int digit = toggleKey - KeyCode.Alpha0;
+                        string keyName = "Digit" + digit;
+                        if (Enum.TryParse<UnityEngine.InputSystem.Key>(keyName, out var digitKey) &&
+                            Keyboard.current[digitKey].wasPressedThisFrame)
+                        {
+                            showWindow = !showWindow;
+                        }
+                    }
+                }
+            }
+#else
+            if (Input.GetKeyDown(toggleKey))
+            {
+                showWindow = !showWindow;
+            }
+#endif
+
             // Apply velocity-drag to the active node each frame
             if (flightPlan != null && flightPlan.Nodes.Count > 0)
             {

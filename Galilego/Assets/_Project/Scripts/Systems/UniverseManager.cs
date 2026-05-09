@@ -36,6 +36,7 @@ namespace Galilego.Physics
         [SerializeField] private double jupiterStandardGravitationalParameter = 1.266865319e17d;
         [SerializeField] private double jupiterRadius = 6.9911e7d;
         [SerializeField] private Vector3d jupiterRealPosition = Vector3d.Zero;
+        [SerializeField] private Vector3 jupiterNorthLocalDirection = Vector3.up;
 
         [Header("Ship")]
         [SerializeField] private ShipSettings ship = new ShipSettings();
@@ -2091,6 +2092,29 @@ namespace Galilego.Physics
             }
 
             return Quaternion.LookRotation(normalizedForward, normalizedUp);
+        }
+
+        private void ApplyTidallyLockedMoonVisualRotation(MoonRail rail, Transform visual, CelestialBody tempMoon)
+        {
+            if (rail == null || visual == null || tempMoon == null)
+            {
+                return;
+            }
+
+            // Direction from moon towards Jupiter in simulation space
+            Vector3d toJupiter = jupiterRealPosition - tempMoon.Position;
+            if (!toJupiter.IsFinite || toJupiter.SqrMagnitude <= 0d)
+            {
+                return;
+            }
+
+            // Convert to Unity direction and build a safe rotation that points the forward
+            // axis of the visual towards Jupiter while keeping a sensible 'up' direction.
+            Vector3 forward = ToUnityDirection(toJupiter);
+            Vector3 up = jupiterNorthLocalDirection;
+
+            Quaternion target = CreateSafeLookRotation(forward, up, visual.rotation);
+            visual.rotation = target;
         }
 
         private ReferenceFrameTarget ResolveActiveReferenceFrameTarget()

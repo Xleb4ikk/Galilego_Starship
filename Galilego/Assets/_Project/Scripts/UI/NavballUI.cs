@@ -1,6 +1,9 @@
+using System;
+using System.Collections.Generic; // На всякий случай для списков
 using TMPro;
 using UnityEngine;
 using UnityEngine.UI;
+
 
 namespace Galilego.Physics
 {
@@ -50,6 +53,10 @@ namespace Galilego.Physics
         }
 
         private const int AutopilotButtonCount = 13;
+
+        // Runtime state for dynamically created autopilot buttons
+        private bool autopilotButtonsCreated = false;
+        private List<AutopilotButtonBinding> autopilotButtonBindings = new List<AutopilotButtonBinding>();
 
         [Header("References")]
         [SerializeField] private UniverseManager universeManager;
