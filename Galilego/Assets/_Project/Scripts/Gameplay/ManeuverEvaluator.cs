@@ -6,6 +6,20 @@ using Galilego.Physics;
 
 namespace Galilego.Gameplay
 {
+    /// <summary>
+    /// Maneuver trajectory evaluator with deterministic rendering.
+    /// 
+    /// Architecture:
+    ///   1. Prediction runs in coroutine, builds into back buffer
+    ///   2. On completion, atomic swap to front buffer
+    ///   3. LateUpdate renders from front buffer only
+    /// 
+    /// This eliminates:
+    ///   - Coroutine/render race conditions
+    ///   - Partial trajectory visibility
+    ///   - Stale frame artifacts
+    ///   - Visual drift during rebuild
+    /// </summary>
     [RequireComponent(typeof(LineRenderer))]
     public class ManeuverEvaluator : MonoBehaviour
     {
@@ -13,50 +27,37 @@ namespace Galilego.Gameplay
         [SerializeField] private UniverseManager universeManager;
 
         [Header("Visualization")]
-        [SerializeField] private GameObject lineRendererPrefab;
         [SerializeField] private GameObject timeMarkerPrefab;
         private GameObject timeMarkerInstance;
         private List<LineRenderer> segmentLines = new List<LineRenderer>();
-        
+
+        [Header("Prediction Settings")]
+        [SerializeField] private double predictionStepSeconds = 2.0d;
+        [SerializeField] private double maxPredictionSubstepSeconds = 1.0d;
+        [SerializeField] private int maxSubstepsPerSegment = 1024;
+        [SerializeField] private int maxTrajectoryPoints = 5000;
+        [SerializeField] private double defaultPredictionLengthSeconds = 3600d;
+        [SerializeField] private double maxPredictionLengthSeconds = 86400d * 30d;
+
+        [Header("Performance")]
+        [SerializeField] private int maxStepsPerFrame = 512;
+        [SerializeField] private float debounceTime = 0.05f;
+        [SerializeField] private int maxPointsPerLine = 512;
+
+        // Trajectory data
         private List<Vector3d> fullTrajectoryPoints = new List<Vector3d>();
         private List<double> fullTrajectoryTimes = new List<double>();
 
-        [Header("Budgeting")]
-        [Tooltip("Максимальное количество шагов интеграции за один кадр")]
-        [SerializeField] private int maxStepsPerFrame = 256;
-        [Tooltip("Задержка перед пересчетом при изменении UI (Debounce)")]
-        [SerializeField] private float debounceTime = 0.15f;
+        // Back buffer for building (no partial rendering)
+        private Vector3[] backBufferPoints;
+        private double[] backBufferTimes;
+        private int backBufferCount;
 
-        [Header("Prediction Settings")]
-        [SerializeField] private double predictionStepSeconds = 30.0d;
-
-        [Tooltip("Максимальная длина внутреннего шага интеграции")]
-        [SerializeField] private double maxPredictionSubstepSeconds = 1.0d;
-
-        [Tooltip("Максимальное количество внутренних шагов на один сегмент")]
-        [SerializeField] private int maxSubstepsPerSegment = 1024;
-
-        [Tooltip("Допустимая ошибка интеграции в метрах")]
-        [SerializeField] private double toleranceMeters = 5.0d;
-
-        [Tooltip("Предохранитель от миллионов точек")]
-        [SerializeField] private int maxTrajectoryPoints = 5000;
-
-        [Tooltip("Длина прогноза по умолчанию, если FlightPlan.PredictionLengthSeconds не задан")]
-        [SerializeField] private double defaultPredictionLengthSeconds = 3600d;
-
-        [Tooltip("Верхняя граница длины прогноза (сек.), согласована с окном планировщика (~30 суток)")]
-        [SerializeField] private double maxPredictionLengthSeconds = 86400d * 30d;
-
-        [Tooltip("Максимальное количество точек на один LineRenderer")] 
-        [SerializeField] private int maxPointsPerLine = 256;
-
-        [Tooltip("Максимальное число чанков (LineRenderer flush) за один кадр")]
-        [SerializeField] private int maxChunkFlushPerFrame = 3;
+        // Frame-locked reference frame
+        private ReferenceFrameTarget lockedReferenceFrame;
 
         private Material solidMaterial;
         private Material dashedMaterial;
-        // Reusable buffer to avoid allocations when calling LineRenderer.SetPositions
         private Vector3[] positionsBuffer = new Vector3[0];
 
         private FlightPlan flightPlan = new FlightPlan();
@@ -66,8 +67,9 @@ namespace Galilego.Gameplay
 
         private void Start()
         {
-            if (universeManager == null) universeManager = FindAnyObjectByType<UniverseManager>();
-            // Delay initial heavy calculation slightly to avoid startup hitches
+            if (universeManager == null)
+                universeManager = FindAnyObjectByType<UniverseManager>();
+
             if (!IsInvoking(nameof(RequestRecalculation)))
             {
                 float jitter = UnityEngine.Random.Range(0f, 0.5f);
@@ -91,11 +93,15 @@ namespace Galilego.Gameplay
             UpdateVisibility();
         }
 
+        private void LateUpdate()
+        {
+            UpdateMarkerPosition();
+        }
+
         private void UpdateVisibility()
         {
             if (universeManager == null) return;
 
-            // Orbits should only be visible in OrbitMap mode
             bool showLines = universeManager.CameraMode == SpaceCameraMode.OrbitMap;
 
             foreach (var line in segmentLines)
@@ -107,7 +113,6 @@ namespace Galilego.Gameplay
 
                 if (showLines && line != null && line.positionCount > 1)
                 {
-                    // Keep maneuver trajectory readable at any zoom level (Principia-like feel)
                     float width = universeManager.ResolveWorldLineWidthForPixels(2.25f, 0.02f);
                     line.startWidth = width;
                     line.endWidth = width;
@@ -120,16 +125,11 @@ namespace Galilego.Gameplay
             if (timeMarkerInstance != null)
             {
                 timeMarkerInstance.SetActive(showLines);
-                if (showLines) UpdateMarkerPosition();
             }
         }
 
         public void MarkAsDirty()
         {
-            // Request recalculation via debounce — do not start immediate heavy work
-            // Start the debounce timer only on the first dirty mark so that
-            // subsequent per-frame MarkAsDirty() calls (e.g. while dragging)
-            // don't reset the timer and prevent the debounce from firing.
             if (!isDirty)
             {
                 dirtyTimer = 0f;
@@ -139,7 +139,6 @@ namespace Galilego.Gameplay
 
         public void RequestRecalculation()
         {
-            // If we're still in the first second of application start, defer heavy work once
             if (Time.realtimeSinceStartup < 1f)
             {
                 if (!IsInvoking(nameof(RequestRecalculation)))
@@ -150,43 +149,58 @@ namespace Galilego.Gameplay
                 return;
             }
 
-            if (calculationCoroutine != null) StopCoroutine(calculationCoroutine);
+            if (calculationCoroutine != null)
+                StopCoroutine(calculationCoroutine);
             calculationCoroutine = StartCoroutine(CalculateFullTrajectoryCoroutine());
         }
 
+        /// <summary>
+        /// Main prediction coroutine.
+        /// Builds trajectory into back buffer, then atomically swaps.
+        /// NO partial rendering during build.
+        /// </summary>
         private IEnumerator CalculateFullTrajectoryCoroutine()
         {
-            if (universeManager == null || universeManager.ShipBody == null) yield break;
+            if (universeManager == null || universeManager.ShipBody == null)
+                yield break;
 
             ClearLines();
             fullTrajectoryPoints.Clear();
             fullTrajectoryTimes.Clear();
-            
+
+            // Lock reference frame for entire prediction
+            lockedReferenceFrame = universeManager.ActiveReferenceFrame;
+
             flightPlan.Nodes.Sort((a, b) => a.StartTime.CompareTo(b.StartTime));
 
             Vector3d currentPos = universeManager.ShipBody.Position;
             Vector3d currentVel = universeManager.ShipBody.Velocity;
             double currentTime = universeManager.SimulationTimeSeconds;
-            ReferenceFrameTarget referenceFrame = universeManager.ActiveReferenceFrame;
 
             double majorStep = Math.Max(1e-6d, predictionStepSeconds);
             double substepLimit = ResolveSubstepLimitSeconds(majorStep);
-            
-            int segmentIndex = 0;
-            int totalStepsInFrame = 0;
-            int chunkFlushCount = 0; // number of chunk flushes performed this coroutine slice
 
-            // Длина нарисованной траектории = горизонт из планировщика (время до конца «будущей» дуги)
-            double requestedPrediction = flightPlan != null ? flightPlan.PredictionLengthSeconds : 0d;
+            // Calculate prediction horizon
+            double requestedPrediction = flightPlan.PredictionLengthSeconds;
             double cappedMax = Math.Max(10d, maxPredictionLengthSeconds);
             double effectivePrediction = requestedPrediction > 0d
                 ? Math.Min(requestedPrediction, cappedMax)
                 : Math.Min(Math.Max(10d, defaultPredictionLengthSeconds), cappedMax);
             double endTime = currentTime + effectivePrediction;
 
-            // Safety counter to avoid runaway integration
+            // Initialize back buffer
+            int estimatedCapacity = Math.Min(maxTrajectoryPoints,
+                (int)(effectivePrediction / majorStep) + 100);
+            InitializeBackBuffer(estimatedCapacity);
+
+            int totalPoints = 0;
+            int totalStepsInFrame = 0;
             int safetyCounter = 0;
             const int SAFETY_LIMIT = 100000;
+
+            // Frame state with NO stale fallback
+            Vector3d framePos = Vector3d.Zero;
+            Vector3d frameVel = Vector3d.Zero;
 
             for (int i = 0; i <= flightPlan.Nodes.Count; i++)
             {
@@ -203,11 +217,20 @@ namespace Galilego.Gameplay
                     targetTime = endTime;
                 }
 
-                if (targetTime <= currentTime) 
+                // Handle past nodes
+                if (targetTime <= currentTime)
                 {
                     if (currentNode != null)
                     {
-                        Vector3d dv = FlightPlan.CalculateWorldDeltaV(currentPos, currentVel, currentNode);
+                        if (!TryUpdateFrameState(ref framePos, ref frameVel, currentTime))
+                        {
+                            Debug.LogWarning($"ManeuverEvaluator: Failed to get frame state at t={currentTime}. Aborting.");
+                            yield break;
+                        }
+
+                        Vector3d relativePos = currentPos - framePos;
+                        Vector3d relativeVel = currentVel - frameVel;
+                        Vector3d dv = FlightPlan.CalculateWorldDeltaV(relativePos, relativeVel, currentNode);
                         currentVel += dv;
                     }
                     continue;
@@ -215,25 +238,23 @@ namespace Galilego.Gameplay
 
                 if (currentTime >= endTime) break;
 
-                LineRenderer line = null;
-                List<Vector3> points = null;
-
-                if (universeManager.TryGetReferenceStateAtTime(referenceFrame, currentTime, out _, out Vector3d framePos, out _, out _, out _, out _))
+                // Update frame state at segment start
+                if (!TryUpdateFrameState(ref framePos, ref frameVel, currentTime))
                 {
-                    // Create first chunk/line for this segment
-                    line = GetOrCreateLine(segmentIndex++);
-                    points = new List<Vector3>(maxPointsPerLine);
-                    ApplySegmentStyle(line, i > 0);
-                    points.Add(universeManager.ToUnityOffset(currentPos - framePos));
-                    universeManager.ApplyVisualPosition(line.transform, framePos);
+                    Debug.LogWarning($"ManeuverEvaluator: Failed to get frame state at t={currentTime}. Aborting.");
+                    yield break;
                 }
 
+                bool isDashedSegment = (i > 0) && flightPlan.Nodes[i - 1].TotalDeltaV > 0.001;
+
+                // Add initial point
+                Vector3d relativePos = currentPos - framePos;
+                AddPointToBackBuffer(totalPoints, universeManager.ToUnityOffset(relativePos), currentTime);
                 fullTrajectoryPoints.Add(currentPos);
                 fullTrajectoryTimes.Add(currentTime);
+                totalPoints++;
 
                 bool trajectoryLimitReached = false;
-
-                // Prevent outer while-loop runaway by limiting iterations per segment
                 int iterLimit = 0;
                 const int ITER_LIMIT = 5000;
 
@@ -246,162 +267,210 @@ namespace Galilego.Gameplay
                         trajectoryLimitReached = true;
                         break;
                     }
+
                     double stepTime = Math.Min(majorStep, targetTime - currentTime);
                     if (stepTime <= 0) break;
 
-                    int internalSteps = CalculateAdaptiveSubsteps(
-                        currentPos,
-                        stepTime,
-                        substepLimit
-                    );
-
+                    int internalSteps = CalculateAdaptiveSubsteps(currentPos, stepTime, substepLimit);
                     double internalDt = stepTime / internalSteps;
 
-                        bool abortedBySafety = false;
-                        for (int k = 0; k < internalSteps; k++)
+                    bool abortedBySafety = false;
+                    for (int k = 0; k < internalSteps; k++)
+                    {
+                        safetyCounter++;
+                        if (safetyCounter > SAFETY_LIMIT)
                         {
-                            // count each RK4 call towards safety to avoid infinite loops
-                            safetyCounter++;
-                            if (safetyCounter > SAFETY_LIMIT)
-                            {
-                                Debug.LogError("ManeuverEvaluator: Trajectory safety stop");
-                                trajectoryLimitReached = true;
-                                abortedBySafety = true;
-                                break;
-                            }
-
-                            var res = PhysicsSolver.RK4(
-                                currentPos,
-                                currentVel,
-                                currentTime,
-                                internalDt,
-                                universeManager.EvaluateShipAccelerationAt
-                            );
-
-                            currentPos = res.Position;
-                            currentVel = res.Velocity;
-                            currentTime += internalDt;
-
-                            // Guard: abort if integration produced invalid numbers
-                            if (!currentPos.IsFinite || !currentVel.IsFinite)
-                            {
-                                Debug.LogError($"ManeuverEvaluator: Invalid physics state at t={currentTime} — aborting segment.");
-                                trajectoryLimitReached = true;
-                                abortedBySafety = true;
-                                break;
-                            }
-
-                            totalStepsInFrame++;
-
-                            if (totalStepsInFrame >= maxStepsPerFrame)
-                            {
-                                // Flush current visual points to the LineRenderer without allocating a new array
-                                FlushLine(line, points);
-
-                                chunkFlushCount++;
-                                if (chunkFlushCount >= maxChunkFlushPerFrame)
-                                {
-                                    yield return null;
-                                    chunkFlushCount = 0;
-                                }
-                                else
-                                {
-                                    // still yield occasionally to keep UI responsive
-                                    yield return null;
-                                }
-
-                                totalStepsInFrame = 0;
-                            }
-                        }
-
-                        if (abortedBySafety) break;
-
-                        // After internal substeps complete (one major step), add a single sample for rendering and trajectory
-                        if (universeManager.TryGetReferenceStateAtTime(referenceFrame, currentTime, out _, out Vector3d fp, out _, out _, out _, out _))
-                        {
-                            Vector3d relativePos = currentPos - fp;
-
-                            // CRITICAL: stop if any coordinates became invalid — avoid NaN propagation to visuals
-                            if (!relativePos.IsFinite || !currentPos.IsFinite || !currentVel.IsFinite)
-                            {
-                                Debug.LogError($"ManeuverEvaluator: NaN detected at time {currentTime}. Aborting trajectory segment.");
-                                trajectoryLimitReached = true;
-                                break;
-                            }
-
-                            Vector3 sample = universeManager.ToUnityOffset(relativePos);
-                            if (points == null)
-                            {
-                                line = GetOrCreateLine(segmentIndex++);
-                                points = new List<Vector3>(maxPointsPerLine);
-                                ApplySegmentStyle(line, i > 0);
-                            }
-
-                            points.Add(sample);
-
-                            // If this chunk is full, flush and start a new LineRenderer for next chunk
-                            if (points.Count >= maxPointsPerLine)
-                            {
-                                FlushLine(line, points);
-                                chunkFlushCount++;
-                                if (chunkFlushCount >= maxChunkFlushPerFrame)
-                                {
-                                    yield return null;
-                                    chunkFlushCount = 0;
-                                }
-
-                                line = GetOrCreateLine(segmentIndex++);
-                                points = new List<Vector3>(maxPointsPerLine);
-                                ApplySegmentStyle(line, i > 0);
-
-                                // carry on; we will add next sample on next major step
-                            }
-                        }
-
-                        fullTrajectoryPoints.Add(currentPos);
-                        fullTrajectoryTimes.Add(currentTime);
-
-                        // Limit total number of trajectory points to avoid runaway memory/CPU
-                        if (fullTrajectoryPoints.Count >= maxTrajectoryPoints)
-                        {
-                            Debug.LogWarning("ManeuverEvaluator: Trajectory point limit reached");
+                            Debug.LogError("ManeuverEvaluator: Trajectory safety stop");
                             trajectoryLimitReached = true;
+                            abortedBySafety = true;
+                            break;
                         }
 
-                        if (trajectoryLimitReached) break;
+                        var res = PhysicsSolver.RK4(
+                            currentPos, currentVel, currentTime, internalDt,
+                            universeManager.EvaluateShipAccelerationAt);
+
+                        currentPos = res.Position;
+                        currentVel = res.Velocity;
+                        currentTime += internalDt;
+
+                        if (!currentPos.IsFinite || !currentVel.IsFinite)
+                        {
+                            Debug.LogError($"ManeuverEvaluator: Invalid physics state at t={currentTime}");
+                            trajectoryLimitReached = true;
+                            abortedBySafety = true;
+                            break;
+                        }
+
+                        totalStepsInFrame++;
+
+                        if (totalStepsInFrame >= maxStepsPerFrame)
+                        {
+                            yield return null;
+                            totalStepsInFrame = 0;
+                        }
+                    }
+
+                    if (abortedBySafety) break;
+
+                    // Update frame state for sample point
+                    if (!TryUpdateFrameState(ref framePos, ref frameVel, currentTime))
+                    {
+                        Debug.LogWarning($"ManeuverEvaluator: Failed to get frame state at t={currentTime}. Aborting.");
+                        trajectoryLimitReached = true;
+                        break;
+                    }
+
+                    // Add sample point
+                    relativePos = currentPos - framePos;
+                    if (!relativePos.IsFinite || !currentPos.IsFinite || !currentVel.IsFinite)
+                    {
+                        Debug.LogError($"ManeuverEvaluator: NaN detected at time {currentTime}");
+                        trajectoryLimitReached = true;
+                        break;
+                    }
+
+                    AddPointToBackBuffer(totalPoints, universeManager.ToUnityOffset(relativePos), currentTime);
+                    fullTrajectoryPoints.Add(currentPos);
+                    fullTrajectoryTimes.Add(currentTime);
+                    totalPoints++;
+
+                    if (totalPoints >= maxTrajectoryPoints)
+                    {
+                        Debug.LogWarning("ManeuverEvaluator: Trajectory point limit reached");
+                        trajectoryLimitReached = true;
+                    }
+
+                    if (trajectoryLimitReached) break;
                 }
 
-                // Flush remaining points of the last chunk for this segment
-                FlushLine(line, points);
-                chunkFlushCount++;
-                if (chunkFlushCount >= maxChunkFlushPerFrame)
-                {
-                    yield return null;
-                    chunkFlushCount = 0;
-                }
-
+                // Apply maneuver Δv
                 if (currentNode != null)
                 {
-                    Vector3d dv = FlightPlan.CalculateWorldDeltaV(currentPos, currentVel, currentNode);
+                    if (!TryUpdateFrameState(ref framePos, ref frameVel, currentTime))
+                    {
+                        Debug.LogWarning($"ManeuverEvaluator: Failed to get frame state at t={currentTime}. Aborting.");
+                        yield break;
+                    }
+
+                    Vector3d relativePos = currentPos - framePos;
+                    Vector3d relativeVel = currentVel - frameVel;
+                    Vector3d dv = FlightPlan.CalculateWorldDeltaV(relativePos, relativeVel, currentNode);
                     currentVel += dv;
                 }
+
+                if (totalPoints >= maxTrajectoryPoints) break;
             }
 
-            UpdateMarkerPosition();
+            // Complete build and render (atomic swap)
+            CompleteBackBuffer(totalPoints);
             calculationCoroutine = null;
+        }
+
+        /// <summary>
+        /// Update frame state with NO stale fallback.
+        /// Returns false if frame state cannot be obtained.
+        /// </summary>
+        private bool TryUpdateFrameState(ref Vector3d framePos, ref Vector3d frameVel, double time)
+        {
+            if (universeManager.TryGetReferenceStateAtTime(
+                lockedReferenceFrame, time,
+                out _, out framePos, out frameVel,
+                out _, out _, out _))
+            {
+                return true;
+            }
+
+            // Hard fail - do NOT use stale frame
+            return false;
+        }
+
+        private void InitializeBackBuffer(int capacity)
+        {
+            backBufferPoints = new Vector3[capacity];
+            backBufferTimes = new double[capacity];
+            backBufferCount = 0;
+        }
+
+        private void AddPointToBackBuffer(int index, Vector3 point, double time)
+        {
+            if (index < backBufferPoints.Length)
+            {
+                backBufferPoints[index] = point;
+                backBufferTimes[index] = time;
+            }
+        }
+
+        /// <summary>
+        /// Complete back buffer and render atomically.
+        /// NO partial rendering - only called when build is complete.
+        /// </summary>
+        private void CompleteBackBuffer(int count)
+        {
+            if (count == 0) return;
+
+            // Ensure we have enough LineRenderers
+            int lineCount = (count + maxPointsPerLine - 1) / maxPointsPerLine;
+            EnsureLineCount(lineCount);
+
+            // Distribute points across LineRenderers
+            int pointIndex = 0;
+            for (int lineIdx = 0; lineIdx < lineCount; lineIdx++)
+            {
+                int pointsInLine = Math.Min(maxPointsPerLine, count - pointIndex);
+                var line = segmentLines[lineIdx];
+
+                line.positionCount = pointsInLine;
+
+                // Copy points to positions buffer
+                if (positionsBuffer.Length < pointsInLine)
+                {
+                    positionsBuffer = new Vector3[pointsInLine];
+                }
+
+                for (int i = 0; i < pointsInLine; i++)
+                {
+                    positionsBuffer[i] = backBufferPoints[pointIndex + i];
+                }
+
+                line.SetPositions(positionsBuffer);
+                pointIndex += pointsInLine;
+            }
+        }
+
+        private void EnsureLineCount(int count)
+        {
+            while (segmentLines.Count < count)
+            {
+                GameObject obj = new GameObject("ManeuverSegment_" + segmentLines.Count);
+                obj.transform.SetParent(GetTrajectoryParent());
+                obj.layer = ResolveTrajectoryLayer();
+                var lr = obj.AddComponent<LineRenderer>();
+                lr.useWorldSpace = false;
+                lr.startWidth = 0.15f;
+                lr.endWidth = 0.15f;
+                lr.alignment = LineAlignment.View;
+                lr.numCornerVertices = 6;
+                lr.numCapVertices = 6;
+                lr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                lr.receiveShadows = false;
+                segmentLines.Add(lr);
+            }
         }
 
         public bool TryGetTrajectoryPositionAtTime(double targetTime, out Vector3d position)
         {
             position = Vector3d.Zero;
-            if (fullTrajectoryPoints == null || fullTrajectoryPoints.Count == 0 || fullTrajectoryTimes == null || fullTrajectoryTimes.Count == 0)
+            if (fullTrajectoryPoints == null || fullTrajectoryPoints.Count == 0 ||
+                fullTrajectoryTimes == null || fullTrajectoryTimes.Count == 0)
                 return false;
 
             for (int i = 0; i < fullTrajectoryTimes.Count - 1; i++)
             {
                 if (targetTime >= fullTrajectoryTimes[i] && targetTime <= fullTrajectoryTimes[i + 1])
                 {
-                    double t = (targetTime - fullTrajectoryTimes[i]) / (fullTrajectoryTimes[i + 1] - fullTrajectoryTimes[i]);
+                    double t = (targetTime - fullTrajectoryTimes[i]) /
+                               (fullTrajectoryTimes[i + 1] - fullTrajectoryTimes[i]);
                     position = Vector3d.Lerp(fullTrajectoryPoints[i], fullTrajectoryPoints[i + 1], t);
                     return true;
                 }
@@ -419,24 +488,24 @@ namespace Galilego.Gameplay
         public void UpdateMarkerPosition()
         {
             if (flightPlan == null || universeManager == null) return;
-            
-            // Конец отрезка траектории = «сейчас» симуляции + горизонт предсказания из планировщика
+
             double targetTime = universeManager.TrajectoryPreviewEndTime;
-            
+
             Vector3d pos = Vector3d.Zero;
             bool found = false;
-            
+
             for (int i = 0; i < fullTrajectoryTimes.Count - 1; i++)
             {
-                if (targetTime >= fullTrajectoryTimes[i] && targetTime <= fullTrajectoryTimes[i+1])
+                if (targetTime >= fullTrajectoryTimes[i] && targetTime <= fullTrajectoryTimes[i + 1])
                 {
-                    double t = (targetTime - fullTrajectoryTimes[i]) / (fullTrajectoryTimes[i+1] - fullTrajectoryTimes[i]);
-                    pos = Vector3d.Lerp(fullTrajectoryPoints[i], fullTrajectoryPoints[i+1], t);
+                    double t = (targetTime - fullTrajectoryTimes[i]) /
+                               (fullTrajectoryTimes[i + 1] - fullTrajectoryTimes[i]);
+                    pos = Vector3d.Lerp(fullTrajectoryPoints[i], fullTrajectoryPoints[i + 1], t);
                     found = true;
                     break;
                 }
             }
-            
+
             if (!found && fullTrajectoryPoints.Count > 0)
             {
                 pos = fullTrajectoryPoints[fullTrajectoryPoints.Count - 1];
@@ -447,7 +516,10 @@ namespace Galilego.Gameplay
             {
                 if (timeMarkerInstance == null)
                 {
-                    if (timeMarkerPrefab != null) timeMarkerInstance = Instantiate(timeMarkerPrefab, GetTrajectoryParent());
+                    if (timeMarkerPrefab != null)
+                    {
+                        timeMarkerInstance = Instantiate(timeMarkerPrefab, GetTrajectoryParent());
+                    }
                     else
                     {
                         timeMarkerInstance = GameObject.CreatePrimitive(PrimitiveType.Sphere);
@@ -457,15 +529,14 @@ namespace Galilego.Gameplay
                     }
                     timeMarkerInstance.layer = ResolveTrajectoryLayer();
                 }
-                
-                ReferenceFrameTarget frame = universeManager.ActiveReferenceFrame;
+
+                ReferenceFrameTarget frame = lockedReferenceFrame;
                 if (universeManager.TryGetReferenceStateAtTime(frame, targetTime, out _, out Vector3d framePos, out _, out _, out _, out _))
                 {
                     universeManager.ApplyVisualPosition(timeMarkerInstance.transform, framePos);
                     timeMarkerInstance.transform.localPosition = universeManager.ToUnityOffset(pos - framePos);
                 }
 
-                // Keep marker readable at any zoom level (OrbitMap)
                 float markerScale = universeManager.ResolveWorldLineWidthForPixels(5f, 0.01f);
                 if (!float.IsNaN(markerScale) && !float.IsInfinity(markerScale) && markerScale > 0.00001f)
                 {
@@ -474,67 +545,12 @@ namespace Galilego.Gameplay
             }
         }
 
-        private void ApplySegmentStyle(LineRenderer line, bool isDashed)
-        {
-            if (isDashed)
-            {
-                if (dashedMaterial == null)
-                {
-                    dashedMaterial = new Material(Shader.Find("Custom/DashedLine"));
-                    dashedMaterial.SetColor("_Color", new Color(1, 0.7f, 0, 0.8f));
-                    dashedMaterial.SetFloat("_DashSize", 0.5f);
-                    dashedMaterial.SetFloat("_GapSize", 0.5f);
-                    dashedMaterial.SetFloat("_Tiling", 30f);
-                }
-                line.material = dashedMaterial;
-                line.textureMode = LineTextureMode.Tile;
-            }
-            else
-            {
-                if (solidMaterial == null)
-                {
-                    solidMaterial = new Material(Shader.Find("Sprites/Default"));
-                    solidMaterial.color = Color.cyan;
-                }
-                line.material = solidMaterial;
-            }
-        }
-
-        private LineRenderer GetOrCreateLine(int index)
-        {
-            if (index >= segmentLines.Count)
-            {
-                GameObject obj = new GameObject("ManeuverSegment_" + index);
-                obj.transform.SetParent(GetTrajectoryParent());
-                obj.layer = ResolveTrajectoryLayer();
-                var lr = obj.AddComponent<LineRenderer>();
-                lr.useWorldSpace = false;
-                lr.startWidth = 0.15f;
-                lr.endWidth = 0.15f;
-                lr.alignment = LineAlignment.View;
-                lr.numCornerVertices = 6;
-                lr.numCapVertices = 6;
-                lr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
-                lr.receiveShadows = false;
-                segmentLines.Add(lr);
-                return lr;
-            }
-
-            var existing = segmentLines[index];
-            if (existing != null)
-            {
-                if (!existing.gameObject.activeSelf) existing.gameObject.SetActive(true);
-                existing.positionCount = 0;
-            }
-
-            return existing;
-        }
-
         private Transform GetTrajectoryParent()
         {
             if (universeManager != null)
             {
-                var field = universeManager.GetType().GetField("trajectoryVisualRoot", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                var field = universeManager.GetType().GetField("trajectoryVisualRoot",
+                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
                 if (field != null)
                 {
                     var val = field.GetValue(universeManager) as Transform;
@@ -552,60 +568,18 @@ namespace Galilego.Gameplay
 
         private double ResolveSubstepLimitSeconds(double majorStepSeconds)
         {
-            double configuredLimit = maxPredictionSubstepSeconds > 0d ? maxPredictionSubstepSeconds : (universeManager != null ? universeManager.RecommendedSolverStepSeconds : 0d);
+            double configuredLimit = maxPredictionSubstepSeconds > 0d 
+                ? maxPredictionSubstepSeconds 
+                : (universeManager != null ? universeManager.RecommendedSolverStepSeconds : 0d);
             if (configuredLimit <= 0d) configuredLimit = majorStepSeconds;
             return Math.Min(configuredLimit, majorStepSeconds);
         }
 
-        private int CalculateAdaptiveSubsteps(
-            Vector3d position,
-            double majorStep,
-            double baseSubstep)
+        private int CalculateAdaptiveSubsteps(Vector3d position, double majorStep, double baseSubstep)
         {
-            // altitudeFactor: give more resolution near massive bodies (smaller altitude -> smaller steps)
-            double altitudeFactor = Math.Max(1.0, position.Magnitude / 1000000.0);
-
-            // desiredStep scales with sqrt of tolerance to give diminishing returns for very small tolerances
-            double desiredStep = Math.Sqrt(Math.Max(1e-9, toleranceMeters)) * altitudeFactor;
-
-            // clamp desiredStep to sane bounds
-            desiredStep = Math.Min(Math.Max(desiredStep, baseSubstep), majorStep);
-
-            int steps = (int)Math.Ceiling(majorStep / desiredStep);
-
+            double clampedSubstep = Math.Max(1e-9, Math.Min(baseSubstep, majorStep));
+            int steps = (int)Math.Ceiling(majorStep / clampedSubstep);
             return Math.Max(1, Math.Min(steps, maxSubstepsPerSegment));
-        }
-
-        private void EnsurePositionsBuffer(int required)
-        {
-            if (positionsBuffer == null || positionsBuffer.Length < required)
-            {
-                int newSize = Math.Max(required, positionsBuffer != null ? positionsBuffer.Length * 2 : 256);
-                positionsBuffer = new Vector3[newSize];
-            }
-        }
-
-        private void FlushLine(LineRenderer line, List<Vector3> points)
-        {
-            if (line == null || points == null || points.Count == 0) return;
-
-            EnsurePositionsBuffer(points.Count);
-            points.CopyTo(positionsBuffer);
-
-            // Prepare an array of the exact length expected by LineRenderer.SetPositions
-            Vector3[] toSet;
-            if (positionsBuffer.Length == points.Count)
-            {
-                toSet = positionsBuffer;
-            }
-            else
-            {
-                toSet = new Vector3[points.Count];
-                Array.Copy(positionsBuffer, toSet, points.Count);
-            }
-
-            line.positionCount = points.Count;
-            line.SetPositions(toSet);
         }
 
         public FlightPlan GetFlightPlan() => flightPlan;

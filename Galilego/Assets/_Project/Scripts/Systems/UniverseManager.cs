@@ -97,8 +97,10 @@ namespace Galilego.Physics
         [Header("Trajectory Visuals")]
         [SerializeField] private bool showShipTrajectory = true;
         [SerializeField] private bool showMoonOrbits = true;
-        [SerializeField] private int shipPredictionSteps = 1200;
-        [SerializeField] private double shipPredictionStepSeconds = 10d;
+                [SerializeField] private int shipPredictionSteps = 1200;
+        // ИСПРАВЛЕНИЕ: Унифицирован с ManeuverEvaluator.predictionStepSeconds = 2.0d
+        // для идентичной точности интеграции при Δv=0
+        [SerializeField] private double shipPredictionStepSeconds = 2d;
         [SerializeField] private float shipPredictionRefreshInterval = 0.2f;
         [SerializeField] private int shipPredictionStepsPerBatch = 128;
         [SerializeField] private int moonOrbitSamples = 256;
@@ -915,8 +917,11 @@ namespace Galilego.Physics
             double dir = Math.Sign(dtTotal);
             double majorStep = Math.Max(1e-6d, maxSolverStepSeconds);
 
-            int iterCount = 0;
-            const int iterSafetyLimit = 1000000; // very large cap to avoid runaway
+                        int iterCount = 0;
+            // ИСПРАВЛЕНИЕ: Уменьшен лимит для предотвращения зависания при больших временных интервалах
+            // При maxSolverStepSeconds=1 и горизонте 30 дней = 2592000 секунд, максимум ~2.5M итераций
+            // Ограничиваем до 100000 для предотвращения длительных зависаний
+            const int iterSafetyLimit = 100000;
 
             while (remaining > 0d)
             {
@@ -2799,16 +2804,32 @@ namespace Galilego.Physics
             ApplyVisualPosition(moonOrbitRoot, ResolveActiveReferenceVisualPosition());
         }
 
-        private void EnsureShipTrajectoryVisualizer()
+                private void EnsureShipTrajectoryVisualizer()
         {
             if (trajectoryVisualRoot == null)
             {
                 return;
             }
 
-            bool hideForManeuverOrbitMap =
-                cameraMode == SpaceCameraMode.OrbitMap &&
-                FindAnyObjectByType<ManeuverEvaluator>() != null;
+                        // ИСПРАВЛЕНИЕ: Орбита аппарата скрывается только если:
+            // 1. Включён режим OrbitMap
+            // 2. Есть ManeuverEvaluator в сцене
+            // 3. Есть узлы манёвров (flightPlan.Nodes.Count > 0)
+            // 4. Переключатель maneuverModeEnabled включён (через FlightPlanUI)
+            bool hideForManeuverOrbitMap = false;
+            if (cameraMode == SpaceCameraMode.OrbitMap)
+            {
+                var ui = FindAnyObjectByType<FlightPlanUI>();
+                if (ui != null && ui.ManeuverModeEnabled)
+                {
+                    var evaluator = FindAnyObjectByType<ManeuverEvaluator>();
+                    if (evaluator != null)
+                    {
+                        var flightPlan = evaluator.GetFlightPlan();
+                        hideForManeuverOrbitMap = flightPlan != null && flightPlan.Nodes.Count > 0;
+                    }
+                }
+            }
 
             if (!showShipTrajectory || hideForManeuverOrbitMap)
             {
@@ -2916,7 +2937,7 @@ namespace Galilego.Physics
             RebuildMoonOrbitLines();
         }
 
-        private void RebuildMoonOrbitLines()
+                private void RebuildMoonOrbitLines()
         {
             if (moonOrbitRoot == null)
             {
@@ -2930,10 +2951,12 @@ namespace Galilego.Physics
             }
 
             ReferenceFrameTarget activeFrame = ResolveActiveReferenceFrameTarget();
-            double previewTime = simulationTimeSeconds + Math.Max(0d, previewTimeOffsetSeconds);
+            // ИСПРАВЛЕНИЕ: Луны всегда рисуются на текущее время симуляции,
+            // previewTimeOffsetSeconds влияет только на траекторию манёвра в ManeuverEvaluator
+            double orbitTime = simulationTimeSeconds;
             if (!TryGetReferenceStateAtTime(
                 activeFrame,
-                previewTime,
+                orbitTime,
                 out _,
                 out Vector3d currentFramePosition,
                 out _,
@@ -2947,7 +2970,7 @@ namespace Galilego.Physics
             ApplyVisualPosition(moonOrbitRoot, currentFramePosition);
 
             int sampleCount = Math.Max(16, moonOrbitSamples);
-            RebuildJupiterOrbitLine(activeFrame, sampleCount, previewTime);
+            RebuildJupiterOrbitLine(activeFrame, sampleCount, orbitTime);
 
             for (int railIndex = 0; railIndex < moonRails.Count; railIndex++)
             {
@@ -2978,13 +3001,13 @@ namespace Galilego.Physics
                 double orbitalPeriod = ResolveOrbitPeriodSeconds(rail);
                 int currentSampleIndex = isFocusedOrbit ? ResolveCurrentOrbitSampleIndex(sampleCount, moonOrbitHistoryFraction) : -1;
 
-                orbitRenderer.positionCount = sampleCount;
+                                orbitRenderer.positionCount = sampleCount;
                 for (int sampleIndex = 0; sampleIndex < sampleCount; sampleIndex++)
                 {
                     double orbitFraction = sampleCount <= 1 ? 0d : (double)sampleIndex / (sampleCount - 1);
                     double sampleTime = sampleIndex == currentSampleIndex
-                        ? previewTime
-                        : ResolveFadedOrbitSampleTime(orbitalPeriod, orbitFraction, previewTime, moonOrbitHistoryFraction);
+                        ? orbitTime
+                        : ResolveFadedOrbitSampleTime(orbitalPeriod, orbitFraction, orbitTime, moonOrbitHistoryFraction);
                     EvaluateMoonState(rail, sampleTime, out Vector3d moonPosition, out _);
 
                     bool useFixedFocusOrigin = isFocusedOrbit && activeFrame == orbitTarget;
@@ -3036,7 +3059,7 @@ namespace Galilego.Physics
             ConfigureMoonOrbitRenderer(jupiterOrbitRenderer, false, ResolveMoonOrbitColor(-1));
         }
 
-        private void RebuildJupiterOrbitLine(ReferenceFrameTarget activeFrame, int sampleCount, double previewTime)
+                private void RebuildJupiterOrbitLine(ReferenceFrameTarget activeFrame, int sampleCount, double orbitTime)
         {
             if (jupiterOrbitRenderer == null)
             {
@@ -3060,7 +3083,7 @@ namespace Galilego.Physics
             for (int sampleIndex = 0; sampleIndex < sampleCount; sampleIndex++)
             {
                 double orbitFraction = sampleCount <= 1 ? 0d : (double)sampleIndex / (sampleCount - 1);
-                double sampleTime = ResolveFadedOrbitSampleTime(orbitalPeriod, orbitFraction, previewTime, moonOrbitHistoryFraction);
+                double sampleTime = ResolveFadedOrbitSampleTime(orbitalPeriod, orbitFraction, orbitTime, moonOrbitHistoryFraction);
 
                 if (!TryGetReferenceStateAtTime(
                     activeFrame,
@@ -3244,13 +3267,15 @@ namespace Galilego.Physics
             }
         }
 
-        private double ResolveFadedOrbitSampleTime(double orbitalPeriod, double orbitFraction, double centerTimeSeconds, float historyFraction)
+                private double ResolveFadedOrbitSampleTime(double orbitalPeriod, double orbitFraction, double centerTimeSeconds, float historyFraction)
         {
             const double aheadFraction = 0.15d;
             double clampedHistory  = Mathf.Clamp01(historyFraction);
             double totalSpan       = aheadFraction + clampedHistory * (1d - aheadFraction);
             double clampedFraction = Clamp(orbitFraction, 0d, 1d);
-            return centerTimeSeconds + (aheadFraction - clampedFraction * totalSpan) * orbitalPeriod;
+            // ИСПРАВЛЕНИЕ: Защита от отрицательного времени - орбиты не могут быть в прошлом до начала симуляции
+            double sampleTime = centerTimeSeconds + (aheadFraction - clampedFraction * totalSpan) * orbitalPeriod;
+            return Math.Max(0d, sampleTime);
         }
 
         private static int ResolveCurrentOrbitSampleIndex(int sampleCount, float historyFraction)

@@ -34,7 +34,7 @@ namespace Galilego.Gameplay
         [Tooltip("Максимальная скорость изменения ΔV (m/s·s⁻¹) при полном отклонении слайдера")]
         [SerializeField] private float maxDragRate = 100f;
 
-        // ─── Runtime ────────────────────────────────────────────────────────────
+                // ─── Runtime ────────────────────────────────────────────────────────────
         private FlightPlan      flightPlan;
         private UniverseManager universeManager;
         private int             selectedNodeIndex;
@@ -42,6 +42,9 @@ namespace Galilego.Gameplay
         private Vector2         mainScroll;
         private bool            showPrediction = true;
         private bool            showSettings;
+                // ИСПРАВЛЕНИЕ: Переключатель режима манёвра - при включении орбиты рисуются новым методом
+        private bool maneuverModeEnabled = true;
+        public bool ManeuverModeEnabled => maneuverModeEnabled;
 
         // Direct-input state (per axis)
         private string inputStartTime = "";
@@ -194,8 +197,12 @@ namespace Galilego.Gameplay
                     lastPredTime    = now;
                     predictionDirty = false;
                 }
-                // Конец отрезка траектории из планировщика (не двигает Юпитер/спутники — только длина линии манёвра и маркер)
-                if (flightPlan != null) universeManager.PreviewTimeOffsetSeconds = flightPlan.PredictionLengthSeconds;
+                                // ИСПРАВЛЕНИЕ: PreviewTimeOffsetSeconds устанавливается только при включённом режиме манёвра
+                // и наличии узлов. При отключении режима — сбрасывается в 0.
+                if (maneuverModeEnabled && flightPlan != null && flightPlan.Nodes.Count > 0)
+                    universeManager.PreviewTimeOffsetSeconds = flightPlan.PredictionLengthSeconds;
+                else
+                    universeManager.PreviewTimeOffsetSeconds = 0;
             }
         }
 
@@ -225,7 +232,10 @@ namespace Galilego.Gameplay
             if (GUILayout.Button("✕", styleButtonSmall)) showWindow   = false;
             GUILayout.EndHorizontal();
 
-            if (showSettings) DrawSettings();
+                        if (showSettings) DrawSettings();
+
+            // ИСПРАВЛЕНИЕ: Переключатель режима манёвра
+            DrawManeuverModeToggle();
 
             if (flightPlan == null)
             { GUILayout.Label("No FlightPlan attached.", styleLabel); GUI.DragWindow(); return; }
@@ -267,7 +277,11 @@ namespace Galilego.Gameplay
         // ─── Node editor ─────────────────────────────────────────────────────────
         private void DrawCurrentNodeEditor()
         {
-            if (flightPlan.Nodes.Count == 0) return;
+            if (flightPlan.Nodes.Count == 0)
+            {
+                GUILayout.Label("No maneuver nodes. Press + to add one.", styleLabelDim);
+                return;
+            }
             selectedNodeIndex = Mathf.Clamp(selectedNodeIndex, 0, flightPlan.Nodes.Count - 1);
             ManeuverNode node = flightPlan.Nodes[selectedNodeIndex];
 
@@ -604,11 +618,31 @@ namespace Galilego.Gameplay
             if (GUILayout.Button("Clear All Nodes", styleButton))
             {
                 flightPlan.Nodes.Clear();
-                EnsureAtLeastOneNode();
                 selectedNodeIndex = 0;
                 MarkDirty();
             }
             GUILayout.EndVertical();
+        }
+
+        // ─── Maneuver mode toggle ────────────────────────────────────────────────
+        private void DrawManeuverModeToggle()
+        {
+            GUILayout.BeginHorizontal(styleSection);
+            GUILayout.Label("Maneuver Mode:", styleLabel, GUILayout.Width(100));
+            bool newValue = GUILayout.Toggle(maneuverModeEnabled, maneuverModeEnabled ? "ENABLED" : "DISABLED",
+                maneuverModeEnabled ? styleButtonActive : styleButton, GUILayout.Width(100));
+            if (newValue != maneuverModeEnabled)
+            {
+                maneuverModeEnabled = newValue;
+                // При отключении режима манёвра — сбрасываем смещение времени
+                if (!maneuverModeEnabled && universeManager != null)
+                {
+                    universeManager.PreviewTimeOffsetSeconds = 0;
+                }
+                MarkDirty();
+            }
+            GUILayout.FlexibleSpace();
+            GUILayout.EndHorizontal();
         }
 
         // ─── Settings panel ──────────────────────────────────────────────────────
@@ -767,7 +801,7 @@ namespace Galilego.Gameplay
             evaluator?.MarkAsDirty();
         }
 
-        private void RefreshPredictionCache()
+                                private void RefreshPredictionCache()
         {
             orbitBefore = orbitAfter = OrbitalElements.Invalid;
             if (universeManager == null || flightPlan == null || flightPlan.Nodes.Count == 0) return;
@@ -778,10 +812,18 @@ namespace Galilego.Gameplay
             if (universeManager.ShipBody == null) return;
             if (!universeManager.TryGetReferenceState(frame, out _, out Vector3d framePos,
                 out Vector3d frameVel, out double mu, out _, out _)) return;
-            Vector3d pos    = universeManager.ShipBody.Position;
-            Vector3d vel    = universeManager.ShipBody.Velocity;
-            Vector3d dv     = FlightPlan.CalculateWorldDeltaV(pos, vel, node);
-            orbitAfter = OrbitalElements.FromState(pos - framePos, (vel + dv) - frameVel, mu);
+            
+            // ИСПРАВЛЕНИЕ: Используем относительные координаты для расчёта Δv
+            Vector3d worldPos = universeManager.ShipBody.Position;
+            Vector3d worldVel = universeManager.ShipBody.Velocity;
+            Vector3d posRelativeToBody = worldPos - framePos;
+            Vector3d relativeVel = worldVel - frameVel;
+            
+            // CalculateWorldDeltaV ожидает позицию и скорость относительно reference body
+            Vector3d dv = FlightPlan.CalculateWorldDeltaV(posRelativeToBody, relativeVel, node);
+            
+            // Для расчёта новой орбиты используем относительные координаты
+            orbitAfter = OrbitalElements.FromState(posRelativeToBody, relativeVel + dv, mu);
         }
 
         private double NowPlus(double sec)

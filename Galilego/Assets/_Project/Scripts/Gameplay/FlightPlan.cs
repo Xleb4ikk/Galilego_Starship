@@ -7,38 +7,59 @@ using UnityEngine;
 namespace Galilego.Gameplay
 {
     /// <summary>
-    /// Модель данных для одного узла маневра (Maneuver Node).
+    /// Maneuver node data.
+    ///
+    /// Δv axes (orbital frame):
+    ///   DvPrograde: along velocity direction (prograde/retrograde)
+    ///   DvNormal: along orbit normal (normal/anti-normal)
+    ///   DvRadial: along radial direction (radial out/in)
     /// </summary>
     [Serializable]
     public class ManeuverNode
     {
         public string Name = "Maneuver";
-        public double StartTime; // Время начала маневра (секунды симуляции)
-        public double DvTangent; // Δv вдоль касательной (Prograde/Retrograde)
-        public double DvNormal;  // Δv вдоль нормали (Normal/Anti-Normal)
-        public double DvBinormal;// Δv вдоль бинормали (Radial In/Out)
+        public double StartTime;
+        public double DvPrograde;   // Δv along prograde direction
+        public double DvNormal;     // Δv along orbit normal
+        public double DvRadial;     // Δv along radial direction (out/in)
 
-        // Дополнительные параметры для реализма (из скриншота)
-        public double Duration = 0d; // Длительность прожига (если не мгновенный)
-        public bool IsInstant = true; // Мгновенный ли импульс
+        public double Duration = 0d;
+        public bool IsInstant = true;
 
-        public ManeuverNode(double time, double tangent = 0, double normal = 0, double binormal = 0)
+        [Obsolete("Use DvPrograde instead")]
+        public double DvTangent
         {
-            StartTime = time;
-            DvTangent = tangent;
-            DvNormal = normal;
-            DvBinormal = binormal;
+            get => DvPrograde;
+            set => DvPrograde = value;
         }
 
-        public double TotalDeltaV => Math.Sqrt(DvTangent * DvTangent + DvNormal * DvNormal + DvBinormal * DvBinormal);
+        [Obsolete("Use DvRadial instead")]
+        public double DvBinormal
+        {
+            get => DvRadial;
+            set => DvRadial = value;
+        }
+
+        public ManeuverNode(double time, double prograde = 0, double normal = 0, double radial = 0)
+        {
+            StartTime = time;
+            DvPrograde = prograde;
+            DvNormal = normal;
+            DvRadial = radial;
+        }
+
+        public double TotalDeltaV => Math.Sqrt(
+            DvPrograde * DvPrograde +
+            DvNormal * DvNormal +
+            DvRadial * DvRadial);
     }
 
-    /// <summary>
+                /// <summary>
     /// Класс, управляющий списком маневров.
-    /// </summary>
+        /// </summary>
     [Serializable]
     public class FlightPlan
-    {
+        {
         public List<ManeuverNode> Nodes = new List<ManeuverNode>();
 
         // Глобальные настройки планирования (из скриншота)
@@ -55,35 +76,40 @@ namespace Galilego.Gameplay
         }
 
         /// <summary>
-        /// Рассчитывает мировой вектор Δv для конкретного узла.
+        /// Calculate world-space Δv vector for a maneuver node.
+        ///
+        /// Uses canonical orbital basis:
+        ///   - Radial: direction from central body to spacecraft
+        ///   - Normal: orbit angular momentum (R × V)
+        ///   - Prograde: perpendicular to radial in velocity direction (N × R)
+        ///
+        /// All inputs must be relative to the reference frame.
         /// </summary>
-        public static Vector3d CalculateWorldDeltaV(Vector3d position, Vector3d velocity, ManeuverNode node)
+        public static Vector3d CalculateWorldDeltaV(
+            Vector3d relativePosition,
+            Vector3d relativeVelocity,
+            ManeuverNode node)
         {
             if (node == null) return Vector3d.Zero;
 
-            // Guard against invalid inputs
-            if (!position.IsFinite || !velocity.IsFinite) return Vector3d.Zero;
+            if (!relativePosition.IsFinite || !relativeVelocity.IsFinite)
+                return Vector3d.Zero;
 
-            // Avoid normalizing an almost-zero velocity vector which can lead to NaN propagation
-            if (velocity.SqrMagnitude < 0.001d) return Vector3d.Zero;
+            if (relativeVelocity.SqrMagnitude < 0.001d)
+                return Vector3d.Zero;
 
-            // Frenet-Serret frame (Prograde, Normal, Radial)
-            Vector3d tangentDir = velocity.Normalized;
-            if (!tangentDir.IsFinite) tangentDir = Vector3d.Zero;
+            // Compute canonical orbital basis
+            OrbitalBasis.TryComputeBasis(
+                relativePosition,
+                relativeVelocity,
+                out Vector3d radial,
+                out Vector3d normal,
+                out Vector3d prograde);
 
-            // Normal is perpendicular to the orbital plane
-            // N = (V x R) / |V x R|
-            Vector3d radialDir = position.Normalized;
-            Vector3d normalDir = Vector3d.Cross(velocity, radialDir).Normalized;
-            if (!normalDir.IsFinite) normalDir = Vector3d.Zero;
-
-            // Binormal (Radial) completes the right-handed set: B = T x N
-            Vector3d binormalDir = Vector3d.Cross(tangentDir, normalDir).Normalized;
-            if (!binormalDir.IsFinite) binormalDir = radialDir;
-
-            return (tangentDir * node.DvTangent) +
-                   (normalDir * node.DvNormal) +
-                   (binormalDir * node.DvBinormal);
+            // Apply Δv in orbital frame
+            return (prograde * node.DvPrograde) +
+                   (normal * node.DvNormal) +
+                   (radial * node.DvRadial);
         }
     }
 }
