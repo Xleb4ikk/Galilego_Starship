@@ -32,6 +32,7 @@ namespace Galilego.Physics
     {
         [Header("Jupiter")]
         [SerializeField] private Transform jupiterTransform;
+        public Transform JupiterTransform => jupiterTransform;
         [SerializeField] private double jupiterMass = 1.89813e27d;
         [SerializeField] private double jupiterStandardGravitationalParameter = 1.266865319e17d;
         [SerializeField] private double jupiterRadius = 6.9911e7d;
@@ -131,6 +132,10 @@ namespace Galilego.Physics
         private CelestialBody shipBody;
         private Vector3d floatingOriginOffset = Vector3d.Zero;
         private Transform trajectoryVisualRoot;
+        public Transform TrajectoryVisualRoot => trajectoryVisualRoot;
+
+        private float nextJupiterLogTime;
+        private float nextShipLogTime;
         private Transform moonOrbitRoot;
         private Transform orbitMapMarkerRoot;
         private LineRenderer jupiterOrbitRenderer;
@@ -291,21 +296,9 @@ namespace Galilego.Physics
                 return;
             }
 
-            if (!realPosition.IsFinite)
-            {
-                WarnInvalidCoordinates(target.name, realPosition);
-                return;
-            }
-
-            if (worldContainer != null && target.IsChildOf(worldContainer))
+            if (target.parent != null)
             {
                 Vector3 localPosition = ToUnityLocalPosition(realPosition);
-                if (!IsFinite(localPosition))
-                {
-                    WarnInvalidCoordinates(target.name, realPosition);
-                    return;
-                }
-
                 target.localPosition = localPosition;
                 return;
             }
@@ -322,7 +315,11 @@ namespace Galilego.Physics
 
         public Vector3 ToUnityPosition(Vector3d realPosition)
         {
+            // floatingOriginOffset - это позиция, вокруг которой центрируется сцена
+            // Чтобы объект в позиции floatingOriginOffset оказался в Unity (0,0,0),
+            // нужно вычесть floatingOriginOffset из realPosition
             Vector3d localPosition = (realPosition - floatingOriginOffset) / GetMetersPerVisualUnit();
+            
             return new Vector3((float)localPosition.X, (float)localPosition.Y, (float)localPosition.Z);
         }
 
@@ -2396,6 +2393,12 @@ namespace Galilego.Physics
             ApplyVisualScale(jupiterTransform, jupiterRadius);
             ApplyVisualPosition(jupiterTransform, jupiterRealPosition);
             ConfigureCelestialBodyRenderers(jupiterTransform);
+            
+            if (jupiterTransform != null && nextJupiterLogTime <= Time.unscaledTime)
+            {
+                nextJupiterLogTime = Time.unscaledTime + 1f;
+                Debug.Log($"[UniverseManager] Jupiter: realPos={jupiterRealPosition.Magnitude:F0}m, unityPos={jupiterTransform.position}, floatingOrigin={floatingOriginOffset.Magnitude:F0}m");
+            }
 
             int bodyCount = moonBodies != null ? moonBodies.Count : 0;
             int railCount = moonRails != null ? moonRails.Count : 0;
@@ -2433,6 +2436,12 @@ namespace Galilego.Physics
 
                 // Ship visual always follows the running simulation here (not the maneuver preview horizon).
                 ApplyVisualPosition(ship.VisualTransform, shipBody.Position);
+                
+                if (nextShipLogTime <= Time.unscaledTime)
+                {
+                    nextShipLogTime = Time.unscaledTime + 1f;
+                    Debug.Log($"[UniverseManager] Ship: realPos={shipBody.Position.Magnitude:F0}m, unityPos={ship.VisualTransform.position}, floatingOrigin={floatingOriginOffset.Magnitude:F0}m");
+                }
             }
 
             if (moonOrbitRoot != null)
@@ -2605,7 +2614,9 @@ namespace Galilego.Physics
         {
             if (worldContainer != null)
             {
+                Vector3 oldPos = worldContainer.position;
                 worldContainer.position -= visualShift;
+                Debug.Log($"[ShiftLoadedSceneRoots] visualShift={visualShift}, worldContainer: {oldPos} → {worldContainer.position}");
                 return;
             }
 
@@ -2786,19 +2797,28 @@ namespace Galilego.Physics
                 trajectoryVisualRoot.SetParent(visualParent, false);
             }
 
+            // КРИТИЧНО: trajectoryVisualRoot должен быть в локальной позиции (0,0,0)
+            // потому что ManeuverEvaluator вычисляет точки относительно референсного фрейма
+            // и использует useWorldSpace=false. Позиция референсного фрейма уже учтена
+            // в вычислениях точек траектории.
+            trajectoryVisualRoot.localPosition = Vector3.zero;
+            
+            Debug.Log($"[UniverseManager] Trajectory root: localPos={trajectoryVisualRoot.localPosition}, worldPos={trajectoryVisualRoot.position}, parent={visualParent.name}, parentPos={visualParent.position}, floatingOrigin={floatingOriginOffset.Magnitude:F0}m");
+
+            // Moon orbits — sibling trajectoryVisualRoot, чтобы не было двойного смещения
             if (moonOrbitRoot == null)
             {
-                moonOrbitRoot = FindChildByName(trajectoryVisualRoot, "Moon_Orbits");
+                moonOrbitRoot = FindChildByName(visualParent, "Moon_Orbits");
                 if (moonOrbitRoot == null)
                 {
                     GameObject orbitRootObject = new GameObject("Moon_Orbits");
                     moonOrbitRoot = orbitRootObject.transform;
-                    moonOrbitRoot.SetParent(trajectoryVisualRoot, false);
+                    moonOrbitRoot.SetParent(visualParent, false);
                 }
             }
-            else if (moonOrbitRoot.parent != trajectoryVisualRoot)
+            else if (moonOrbitRoot.parent != visualParent)
             {
-                moonOrbitRoot.SetParent(trajectoryVisualRoot, false);
+                moonOrbitRoot.SetParent(visualParent, false);
             }
 
             ApplyVisualPosition(moonOrbitRoot, ResolveActiveReferenceVisualPosition());
@@ -2815,19 +2835,14 @@ namespace Galilego.Physics
             // 1. Включён режим OrbitMap
             // 2. Есть ManeuverEvaluator в сцене
             // 3. Есть узлы манёвров (flightPlan.Nodes.Count > 0)
-            // 4. Переключатель maneuverModeEnabled включён (через FlightPlanUI)
             bool hideForManeuverOrbitMap = false;
             if (cameraMode == SpaceCameraMode.OrbitMap)
             {
-                var ui = FindAnyObjectByType<FlightPlanUI>();
-                if (ui != null && ui.ManeuverModeEnabled)
+                var evaluator = FindAnyObjectByType<ManeuverEvaluator>();
+                if (evaluator != null)
                 {
-                    var evaluator = FindAnyObjectByType<ManeuverEvaluator>();
-                    if (evaluator != null)
-                    {
-                        var flightPlan = evaluator.GetFlightPlan();
-                        hideForManeuverOrbitMap = flightPlan != null && flightPlan.Nodes.Count > 0;
-                    }
+                    var flightPlan = evaluator.GetFlightPlan();
+                    hideForManeuverOrbitMap = flightPlan != null && flightPlan.Nodes.Count > 0;
                 }
             }
 
@@ -2970,7 +2985,7 @@ namespace Galilego.Physics
             ApplyVisualPosition(moonOrbitRoot, currentFramePosition);
 
             int sampleCount = Math.Max(16, moonOrbitSamples);
-            RebuildJupiterOrbitLine(activeFrame, sampleCount, orbitTime);
+            RebuildJupiterOrbitLine(activeFrame, sampleCount, orbitTime, currentFramePosition);
 
             for (int railIndex = 0; railIndex < moonRails.Count; railIndex++)
             {
@@ -3010,27 +3025,7 @@ namespace Galilego.Physics
                         : ResolveFadedOrbitSampleTime(orbitalPeriod, orbitFraction, orbitTime, moonOrbitHistoryFraction);
                     EvaluateMoonState(rail, sampleTime, out Vector3d moonPosition, out _);
 
-                    bool useFixedFocusOrigin = isFocusedOrbit && activeFrame == orbitTarget;
-                    if (useFixedFocusOrigin)
-                    {
-                        orbitRenderer.SetPosition(sampleIndex, ToUnityOffset(moonPosition - currentFramePosition));
-                        continue;
-                    }
-
-                    if (!TryGetReferenceStateAtTime(
-                        activeFrame,
-                        sampleTime,
-                        out _,
-                        out Vector3d framePosition,
-                        out _,
-                        out _,
-                        out _,
-                        out _))
-                    {
-                        framePosition = jupiterRealPosition;
-                    }
-
-                    orbitRenderer.SetPosition(sampleIndex, ToUnityOffset(moonPosition - framePosition));
+                    orbitRenderer.SetPosition(sampleIndex, ToUnityOffset(moonPosition - currentFramePosition));
                 }
             }
         }
@@ -3059,7 +3054,7 @@ namespace Galilego.Physics
             ConfigureMoonOrbitRenderer(jupiterOrbitRenderer, false, ResolveMoonOrbitColor(-1));
         }
 
-                private void RebuildJupiterOrbitLine(ReferenceFrameTarget activeFrame, int sampleCount, double orbitTime)
+        private void RebuildJupiterOrbitLine(ReferenceFrameTarget activeFrame, int sampleCount, double orbitTime, Vector3d currentFramePosition)
         {
             if (jupiterOrbitRenderer == null)
             {
@@ -3085,20 +3080,7 @@ namespace Galilego.Physics
                 double orbitFraction = sampleCount <= 1 ? 0d : (double)sampleIndex / (sampleCount - 1);
                 double sampleTime = ResolveFadedOrbitSampleTime(orbitalPeriod, orbitFraction, orbitTime, moonOrbitHistoryFraction);
 
-                if (!TryGetReferenceStateAtTime(
-                    activeFrame,
-                    sampleTime,
-                    out _,
-                    out Vector3d framePosition,
-                    out _,
-                    out _,
-                    out _,
-                    out _))
-                {
-                    framePosition = jupiterRealPosition;
-                }
-
-                jupiterOrbitRenderer.SetPosition(sampleIndex, ToUnityOffset(jupiterRealPosition - framePosition));
+                jupiterOrbitRenderer.SetPosition(sampleIndex, ToUnityOffset(jupiterRealPosition - currentFramePosition));
             }
         }
 
