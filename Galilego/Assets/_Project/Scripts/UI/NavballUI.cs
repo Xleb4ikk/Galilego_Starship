@@ -1,8 +1,9 @@
 using System;
-using System.Collections.Generic;
+using System.Collections.Generic; // На всякий случай для списков
 using TMPro;
 using UnityEngine;
 using UnityEngine.UI;
+
 
 namespace Galilego.Physics
 {
@@ -46,11 +47,16 @@ namespace Galilego.Physics
         {
             public Button Button;
             public Image Background;
+            public Image Icon;
             public NavballDirectionMode Direction;
             public bool IsStopButton;
         }
 
         private const int AutopilotButtonCount = 13;
+
+        // Runtime state for dynamically created autopilot buttons
+        private bool autopilotButtonsCreated = false;
+        private List<AutopilotButtonBinding> autopilotButtonBindings = new List<AutopilotButtonBinding>();
 
         [Header("References")]
         [SerializeField] private UniverseManager universeManager;
@@ -82,12 +88,17 @@ namespace Galilego.Physics
         [SerializeField] private NavballAutopilotController autopilot;
         [SerializeField] private bool createAutopilotButtons = true;
         [SerializeField] private RectTransform autopilotButtonsRoot;
-        [SerializeField] private Vector2 autopilotButtonsOffset = new Vector2(0f, -142f);
-        [SerializeField] private Vector2 autopilotButtonSize = new Vector2(44f, 24f);
-        [SerializeField] private int autopilotButtonColumns = 5;
+        [SerializeField] private Vector2 autopilotButtonsOffset = new Vector2(-155f, 0f);
+        [SerializeField] private Vector2 autopilotButtonSize = new Vector2(36f, 36f);
+        [SerializeField] private int autopilotButtonColumns = 2;
         [SerializeField] private Color autopilotButtonColor = new Color(0.08f, 0.09f, 0.1f, 0.88f);
         [SerializeField] private Color autopilotActiveButtonColor = new Color(0.1f, 0.58f, 0.72f, 0.95f);
         [SerializeField] private Color autopilotStopButtonColor = new Color(0.28f, 0.08f, 0.08f, 0.9f);
+
+        [Header("Autopilot UI Style")]
+        [SerializeField] private Sprite autopilotButtonBackground;
+        [SerializeField] private Sprite autopilotStopIcon;
+        [SerializeField] private float autopilotIconScale = 0.85f;
 
         [Header("Display")]
         [SerializeField] private float markerRadius = 82f;
@@ -775,19 +786,19 @@ namespace Galilego.Physics
             autopilotButtonsCreated = true;
             autopilotButtonBindings.Clear();
 
-            CreateAutopilotButton("PRO", NavballDirectionMode.Prograde);
-            CreateAutopilotButton("RET", NavballDirectionMode.Retrograde);
-            CreateAutopilotButton("IN", NavballDirectionMode.RadialIn);
-            CreateAutopilotButton("OUT", NavballDirectionMode.RadialOut);
-            CreateAutopilotButton("TGT", NavballDirectionMode.SelectedTarget);
-            CreateAutopilotButton("ATG", NavballDirectionMode.AntiSelectedTarget);
-            CreateAutopilotButton("NRM", NavballDirectionMode.Normal);
-            CreateAutopilotButton("AN", NavballDirectionMode.AntiNormal);
-            CreateAutopilotButton("N", NavballDirectionMode.North);
-            CreateAutopilotButton("E", NavballDirectionMode.East);
-            CreateAutopilotButton("S", NavballDirectionMode.South);
-            CreateAutopilotButton("W", NavballDirectionMode.West);
-            CreateAutopilotStopButton("OFF");
+            CreateAutopilotButton(NavballDirectionMode.Prograde);
+            CreateAutopilotButton(NavballDirectionMode.Retrograde);
+            CreateAutopilotButton(NavballDirectionMode.RadialIn);
+            CreateAutopilotButton(NavballDirectionMode.RadialOut);
+            CreateAutopilotButton(NavballDirectionMode.SelectedTarget);
+            CreateAutopilotButton(NavballDirectionMode.AntiSelectedTarget);
+            CreateAutopilotButton(NavballDirectionMode.Normal);
+            CreateAutopilotButton(NavballDirectionMode.AntiNormal);
+            CreateAutopilotButton(NavballDirectionMode.North);
+            CreateAutopilotButton(NavballDirectionMode.East);
+            CreateAutopilotButton(NavballDirectionMode.South);
+            CreateAutopilotButton(NavballDirectionMode.West);
+            CreateAutopilotStopButton();
         }
 
         private RectTransform CreateAutopilotButtonsRoot()
@@ -798,15 +809,15 @@ namespace Galilego.Physics
             RectTransform root = rootObject.GetComponent<RectTransform>();
             root.anchorMin = new Vector2(0.5f, 0.5f);
             root.anchorMax = new Vector2(0.5f, 0.5f);
-            root.pivot = new Vector2(0.5f, 0.5f);
+            root.pivot = new Vector2(1f, 0.5f); // Pivot to the right side of the root, so it grows left if needed
             root.anchoredPosition = autopilotButtonsOffset;
 
             GridLayoutGroup grid = rootObject.GetComponent<GridLayoutGroup>();
             grid.cellSize = autopilotButtonSize;
-            grid.spacing = new Vector2(4f, 4f);
+            grid.spacing = new Vector2(6f, 6f);
             grid.constraint = GridLayoutGroup.Constraint.FixedColumnCount;
             grid.constraintCount = Mathf.Max(1, autopilotButtonColumns);
-            grid.childAlignment = TextAnchor.MiddleCenter;
+            grid.childAlignment = TextAnchor.MiddleRight;
 
             int columns = Mathf.Max(1, autopilotButtonColumns);
             int rows = Mathf.CeilToInt(AutopilotButtonCount / (float)columns);
@@ -817,9 +828,11 @@ namespace Galilego.Physics
             return root;
         }
 
-        private void CreateAutopilotButton(string label, NavballDirectionMode direction)
+        private void CreateAutopilotButton(NavballDirectionMode direction)
         {
-            Button button = CreateAutopilotButtonObject(label, autopilotButtonColor, out Image background);
+            Sprite icon = GetDirectionSprite(direction);
+            Button button = CreateAutopilotButtonObject(direction.ToString(), icon, autopilotButtonColor, out Image background, out Image iconImage);
+            
             NavballDirectionMode capturedDirection = direction;
             button.onClick.AddListener(() =>
             {
@@ -834,14 +847,15 @@ namespace Galilego.Physics
             {
                 Button = button,
                 Background = background,
+                Icon = iconImage,
                 Direction = direction,
                 IsStopButton = false
             });
         }
 
-        private void CreateAutopilotStopButton(string label)
+        private void CreateAutopilotStopButton()
         {
-            Button button = CreateAutopilotButtonObject(label, autopilotStopButtonColor, out Image background);
+            Button button = CreateAutopilotButtonObject("OFF", autopilotStopIcon, autopilotStopButtonColor, out Image background, out Image iconImage);
             button.onClick.AddListener(() =>
             {
                 if (autopilot != null)
@@ -855,19 +869,21 @@ namespace Galilego.Physics
             {
                 Button = button,
                 Background = background,
+                Icon = iconImage,
                 IsStopButton = true
             });
         }
 
-        private Button CreateAutopilotButtonObject(string label, Color backgroundColor, out Image background)
+        private Button CreateAutopilotButtonObject(string name, Sprite icon, Color backgroundColor, out Image background, out Image iconImage)
         {
-            GameObject buttonObject = new GameObject(label, typeof(RectTransform), typeof(CanvasRenderer), typeof(Image), typeof(Button));
+            GameObject buttonObject = new GameObject(name, typeof(RectTransform), typeof(CanvasRenderer), typeof(Image), typeof(Button));
             buttonObject.transform.SetParent(autopilotButtonsRoot, false);
 
             RectTransform rectTransform = buttonObject.GetComponent<RectTransform>();
             rectTransform.sizeDelta = autopilotButtonSize;
 
             background = buttonObject.GetComponent<Image>();
+            background.sprite = autopilotButtonBackground;
             background.color = backgroundColor;
             background.raycastTarget = true;
 
@@ -881,26 +897,76 @@ namespace Galilego.Physics
             colors.colorMultiplier = 1f;
             button.colors = colors;
 
-            GameObject textObject = new GameObject("Label", typeof(RectTransform), typeof(CanvasRenderer), typeof(TextMeshProUGUI));
-            textObject.transform.SetParent(buttonObject.transform, false);
+            iconImage = null;
+            if (icon != null)
+            {
+                GameObject iconObject = new GameObject("Icon", typeof(RectTransform), typeof(CanvasRenderer), typeof(Image));
+                iconObject.transform.SetParent(buttonObject.transform, false);
 
-            RectTransform textTransform = textObject.GetComponent<RectTransform>();
-            textTransform.anchorMin = Vector2.zero;
-            textTransform.anchorMax = Vector2.one;
-            textTransform.offsetMin = Vector2.zero;
-            textTransform.offsetMax = Vector2.zero;
+                RectTransform iconTransform = iconObject.GetComponent<RectTransform>();
+                iconTransform.anchorMin = Vector2.zero;
+                iconTransform.anchorMax = Vector2.one;
+                iconTransform.offsetMin = Vector2.zero;
+                iconTransform.offsetMax = Vector2.zero;
+                iconTransform.localScale = Vector3.one * autopilotIconScale;
 
-            TextMeshProUGUI text = textObject.GetComponent<TextMeshProUGUI>();
-            text.text = label;
-            text.fontSize = 11f;
-            text.enableAutoSizing = true;
-            text.fontSizeMin = 7f;
-            text.fontSizeMax = 11f;
-            text.alignment = TextAlignmentOptions.Center;
-            text.color = Color.white;
-            text.raycastTarget = false;
+                iconImage = iconObject.GetComponent<Image>();
+                iconImage.sprite = icon;
+                iconImage.raycastTarget = false;
+            }
+            else
+            {
+                // Fallback to text if no icon
+                GameObject textObject = new GameObject("Label", typeof(RectTransform), typeof(CanvasRenderer), typeof(TextMeshProUGUI));
+                textObject.transform.SetParent(buttonObject.transform, false);
+
+                RectTransform textTransform = textObject.GetComponent<RectTransform>();
+                textTransform.anchorMin = Vector2.zero;
+                textTransform.anchorMax = Vector2.one;
+                textTransform.offsetMin = Vector2.zero;
+                textTransform.offsetMax = Vector2.zero;
+
+                TextMeshProUGUI text = textObject.GetComponent<TextMeshProUGUI>();
+                text.text = name.Length > 3 ? name.Substring(0, 3) : name;
+                text.fontSize = 10f;
+                text.enableAutoSizing = true;
+                text.fontSizeMin = 6f;
+                text.fontSizeMax = 10f;
+                text.alignment = TextAlignmentOptions.Center;
+                text.color = Color.white;
+                text.raycastTarget = false;
+            }
 
             return button;
+        }
+
+        private Sprite GetDirectionSprite(NavballDirectionMode mode)
+        {
+            RectTransform marker = null;
+            switch (mode)
+            {
+                case NavballDirectionMode.Prograde: marker = progradeMarker; break;
+                case NavballDirectionMode.Retrograde: marker = retrogradeMarker; break;
+                case NavballDirectionMode.RadialOut: marker = radialOutMarker; break;
+                case NavballDirectionMode.RadialIn: marker = radialInMarker; break;
+                case NavballDirectionMode.Normal: marker = normalMarker; break;
+                case NavballDirectionMode.AntiNormal: marker = antiNormalMarker; break;
+                case NavballDirectionMode.North: marker = northMarker; break;
+                case NavballDirectionMode.East: marker = eastMarker; break;
+                case NavballDirectionMode.South: marker = southMarker; break;
+                case NavballDirectionMode.West: marker = westMarker; break;
+                case NavballDirectionMode.SelectedTarget: marker = selectedTargetMarker; break;
+                case NavballDirectionMode.AntiSelectedTarget: marker = antiSelectedTargetMarker; break;
+            }
+
+            if (marker != null)
+            {
+                Image img = marker.GetComponent<Image>();
+                if (img == null) img = marker.GetComponentInChildren<Image>();
+                if (img != null) return img.sprite;
+            }
+
+            return null;
         }
 
         private void RefreshAutopilotButtons()

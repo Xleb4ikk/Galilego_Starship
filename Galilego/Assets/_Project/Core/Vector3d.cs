@@ -1,8 +1,9 @@
 using System;
+using UnityEngine;
 
 namespace Galilego.Physics
 {
-    [Serializable]
+[Serializable]
     public struct Vector3d
     {
         public static readonly Vector3d Zero = new Vector3d(0d, 0d, 0d);
@@ -78,8 +79,16 @@ namespace Galilego.Physics
                 (left.X * right.Y) - (left.Y * right.X));
         }
 
-        public override string ToString()
+        public static Vector3d Lerp(Vector3d a, Vector3d b, double t)
         {
+            t = Math.Max(0d, Math.Min(1d, t));
+            return new Vector3d(a.X + (b.X - a.X) * t, a.Y + (b.Y - a.Y) * t, a.Z + (b.Z - a.Z) * t);
+        }
+
+        public Vector3 ToVector3() => new Vector3((float)X, (float)Y, (float)Z);
+
+        public override string ToString()
+{
             return $"({X}, {Y}, {Z})";
         }
 
