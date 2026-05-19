@@ -34,10 +34,10 @@ namespace Galilego.Gameplay
         [Header("Prediction Settings")]
         [SerializeField] private double predictionStepSeconds = 10.0d;
         [SerializeField] private double maxPredictionSubstepSeconds = 5.0d;
-        [SerializeField] private int maxSubstepsPerSegment = 256;
-        [SerializeField] private int maxTrajectoryPoints = 2000;
+        [SerializeField] private int maxSubstepsPerSegment = 4096;
+        [SerializeField] private int maxTrajectoryPoints = 10000;
         [SerializeField] private double defaultPredictionLengthSeconds = 7200d;
-        [SerializeField] private double maxPredictionLengthSeconds = 86400d;
+        [SerializeField] private double maxPredictionLengthSeconds = 315360000d; // 10 years
 
         [Header("Performance")]
         [SerializeField] private int maxStepsPerFrame = 10000;
@@ -147,6 +147,16 @@ namespace Galilego.Gameplay
             }
         }
 
+        /// <summary>
+        /// Lightweight dirty flag without stopping running calculation.
+        /// Used during scrubbing to avoid restarting the coroutine every frame.
+        /// </summary>
+        public void MarkAsDirtyLightweight()
+        {
+            isDirty = true;
+            dirtyTimer = 0f;
+        }
+
         public void RequestRecalculation()
         {
             if (Time.realtimeSinceStartup < 1f)
@@ -198,27 +208,21 @@ namespace Galilego.Gameplay
 
             Debug.Log($"[ManeuverEvaluator] Initial state: pos={currentPos.Magnitude:F0}m, vel={currentVel.Magnitude:F2}m/s, time={currentTime:F1}s");
 
-            double majorStep = Math.Max(1e-6d, predictionStepSeconds);
-            double substepLimit = ResolveSubstepLimitSeconds(majorStep);
-
             // Calculate prediction horizon
             double requestedPrediction = flightPlan.PredictionLengthSeconds;
-            double cappedMax = Math.Min(maxPredictionLengthSeconds, 86400d); // Force max 1 day
             double effectivePrediction = requestedPrediction > 0d
-                ? Math.Min(requestedPrediction, cappedMax)
-                : Math.Min(Math.Max(10d, defaultPredictionLengthSeconds), cappedMax);
+                ? Math.Min(requestedPrediction, maxPredictionLengthSeconds)
+                : Math.Min(Math.Max(10d, defaultPredictionLengthSeconds), maxPredictionLengthSeconds);
             double endTime = currentTime + effectivePrediction;
-            
-            // Force reset if prediction is too long
-            if (requestedPrediction > cappedMax)
-            {
-                Debug.LogWarning($"[ManeuverEvaluator] Prediction length {requestedPrediction:F0}s exceeds maximum {cappedMax:F0}s, capping to {cappedMax:F0}s");
-                flightPlan.PredictionLengthSeconds = cappedMax;
-            }
 
-            // Initialize back buffer — allocate enough for the full prediction
-            int backBufferCapacity = (int)(effectivePrediction / Math.Max(1e-6d, majorStep)) + 100;
-            backBufferCapacity = Math.Max(1000, Math.Min(maxTrajectoryPoints, backBufferCapacity));
+            // Adaptive step: fill ~90% of buffer for smooth rendering
+            double adaptiveStep = effectivePrediction / Math.Max(1, (int)(maxTrajectoryPoints * 0.9));
+            double majorStep = Math.Max(1e-6d, Math.Max(predictionStepSeconds, adaptiveStep));
+            double substepLimit = ResolveSubstepLimitSeconds(majorStep);
+
+            // Initialize back buffer
+            int backBufferCapacity = (int)(effectivePrediction / majorStep) + 100;
+            backBufferCapacity = Math.Min(maxTrajectoryPoints, backBufferCapacity);
             InitializeBackBuffer(backBufferCapacity);
             
             Debug.Log($"[ManeuverEvaluator] Back buffer capacity: {backBufferCapacity}, prediction length: {effectivePrediction:F0}s");
@@ -231,7 +235,7 @@ namespace Galilego.Gameplay
 
             int totalPoints = 0;
             int totalStepsInFrame = 0;
-            const int SAFETY_LIMIT_PER_SEGMENT = 500000;
+            const int SAFETY_LIMIT_PER_SEGMENT = 10000000;
 
             // Frame state with NO stale fallback
             Vector3d framePos = Vector3d.Zero;

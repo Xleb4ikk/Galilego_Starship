@@ -64,6 +64,9 @@ namespace Galilego.Gameplay
         private int editingDvAxis = -1; // 0=prograde, 1=normal, 2=radial
         private string editingDvText;
 
+        // Scrub state
+        private float predictionScrubValue = 0f;
+
         // Статус ошибки
         private ManeuverStatus currentStatus = ManeuverStatus.OK;
         private string statusMessage = "";
@@ -143,6 +146,21 @@ namespace Galilego.Gameplay
             }
 #endif
 
+            // Apply scrub rate (centered spring-loaded slider)
+            if (Mathf.Abs(predictionScrubValue) > 0.01f && flightPlan != null)
+            {
+                double length = flightPlan.PredictionLengthSeconds;
+                double mag = predictionScrubValue * predictionScrubValue;
+                double effectivePos = predictionScrubValue > 0 ? mag : -mag;
+                double rate = length * effectivePos * 2.0;
+                double newLength = Math.Max(60.0, Math.Min(315360000.0, length + rate * Time.unscaledDeltaTime));
+                var result = flightPlan.SetDesiredFinalTime(newLength);
+                if (result.IsOk)
+                {
+                    evaluator?.MarkAsDirtyLightweight();
+                }
+            }
+
             // Update prediction offset
             if (universeManager != null && flightPlan != null && flightPlan.Nodes.Count > 0)
             {
@@ -201,30 +219,56 @@ namespace Galilego.Gameplay
             GUILayout.BeginVertical(styleSection);
             GUILayout.Label("FLIGHT PLAN", styleHeader);
 
-            // Desired final time slider
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("Plan length:", styleLabel, GUILayout.Width(80));
-            
             double currentLength = flightPlan.PredictionLengthSeconds;
-            double minLength = flightPlan.Nodes.Count > 0 ? flightPlan.Nodes[flightPlan.Nodes.Count - 1].FinalTime : 60;
-            
-            // Simple slider - limit to 1 day max
-            float frac = Mathf.InverseLerp(60f, 86400f, (float)currentLength);
-            float newFrac = GUILayout.HorizontalSlider(frac, 0f, 1f);
-            if (!Mathf.Approximately(frac, newFrac))
-            {
-                double newLength = Mathf.Lerp(60f, 86400f, newFrac);
-                var result = flightPlan.SetDesiredFinalTime(newLength);
-                if (!result.IsOk)
-                {
-                    UpdateStatus(result.Status, result.Message);
-                }
-            }
-            
-            GUILayout.Label(FormatDuration(currentLength), styleLabel, GUILayout.Width(70));
+
+            // Display current end time
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("End time:", styleLabel, GUILayout.Width(70));
+            GUILayout.Label(FormatDuration(currentLength), styleLabelGreen, GUILayout.Width(80));
+            GUILayout.FlexibleSpace();
             GUILayout.EndHorizontal();
 
+            // Preset time buttons
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("1h", styleButtonSmall)) ApplyPredictionLength(3600);
+            if (GUILayout.Button("6h", styleButtonSmall)) ApplyPredictionLength(21600);
+            if (GUILayout.Button("1d", styleButtonSmall)) ApplyPredictionLength(86400);
+            if (GUILayout.Button("7d", styleButtonSmall)) ApplyPredictionLength(604800);
+            if (GUILayout.Button("30d", styleButtonSmall)) ApplyPredictionLength(2592000);
+            GUILayout.EndHorizontal();
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("1y", styleButtonSmall)) ApplyPredictionLength(31557600);
+            if (GUILayout.Button("10y", styleButtonSmall)) ApplyPredictionLength(315360000);
+            GUILayout.FlexibleSpace();
+            GUILayout.EndHorizontal();
+
+            // Centered scrub slider (spring-loaded)
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("◀", styleLabelDim, GUILayout.Width(14));
+            predictionScrubValue = GUILayout.HorizontalSlider(predictionScrubValue, -1f, 1f);
+            GUILayout.Label("▶", styleLabelDim, GUILayout.Width(14));
+            GUILayout.EndHorizontal();
+
+            if (Event.current.type == EventType.MouseUp)
+            {
+                predictionScrubValue = 0f;
+            }
+
             GUILayout.EndVertical();
+        }
+
+        private void ApplyPredictionLength(double seconds)
+        {
+            var result = flightPlan.SetDesiredFinalTime(seconds);
+            if (result.IsOk)
+            {
+                evaluator?.MarkAsDirty();
+                ResetStatus();
+            }
+            else
+            {
+                UpdateStatus(result.Status, result.Message);
+            }
         }
 
         // ─── Integration parameters ─────────────────────────────────────────────
@@ -757,10 +801,16 @@ namespace Galilego.Gameplay
         {
             if (double.IsInfinity(s) || double.IsNaN(s)) return "∞";
             if (s < 0) s = 0;
-            int d = (int)(s / 86400), h = (int)((s % 86400) / 3600);
-            int m = (int)((s % 3600) / 60), sec = (int)(s % 60);
-            if (d > 0) return $"{d}d {h:00}h {m:00}m";
-            if (h > 0) return $"{h}h {m:00}m {sec:00}s";
+            const double day = 86400;
+            const double year = 31557600; // 365.25 days
+            int y = (int)(s / year);
+            int d = (int)((s % year) / day);
+            int h = (int)((s % day) / 3600);
+            int m = (int)((s % 3600) / 60);
+            int sec = (int)(s % 60);
+            if (y > 0) return $"{y}y {d}d";
+            if (d > 0) return $"{d}d {h:00}h";
+            if (h > 0) return $"{h}h {m:00}m";
             if (m > 0) return $"{m}m {sec:00}s";
             return $"{sec}s";
         }
