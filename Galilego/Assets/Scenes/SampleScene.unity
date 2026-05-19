@@ -2536,13 +2536,13 @@ MonoBehaviour:
   predictionStepSeconds: 5
   maxPredictionSubstepSeconds: 0
   maxSubstepsPerSegment: 256
-  maxTrajectoryPoints: 2000
+  maxTrajectoryPoints: 50000
   defaultPredictionLengthSeconds: 7200
-  maxPredictionLengthSeconds: 86400
+  maxPredictionLengthSeconds: 315360000
   maxStepsPerFrame: 256
   forceSynchronousCalculation: 0
   debounceTime: 0.15
-  maxPointsPerLine: 512
+  maxPointsPerLine: 65535
 --- !u!120 &861880902
 LineRenderer:
   serializedVersion: 3

@@ -113,8 +113,22 @@ namespace Galilego.Gameplay
             if (evaluator != null)
             {
                 flightPlan = evaluator.GetFlightPlan();
+                InitializeIntegrationParams();
                 EnsureAtLeastOneNode();
             }
+        }
+
+        private void InitializeIntegrationParams()
+        {
+            int steps = flightPlan.MaxStepsPerSegment;
+            int bestIdx = 0;
+            for (int i = 0; i < MaxSteps.Length; i++)
+            {
+                if (MaxSteps[i] <= steps)
+                    bestIdx = i;
+            }
+            maxStepsIndex = bestIdx;
+            flightPlan.MaxStepsPerSegment = MaxSteps[maxStepsIndex];
         }
 
         private void Update()
@@ -285,11 +299,15 @@ namespace Galilego.Gameplay
             if (maxStepsIndex > 0 && GUILayout.Button("−", styleButtonSmall, GUILayout.Width(24)))
             {
                 maxStepsIndex--;
+                flightPlan.MaxStepsPerSegment = MaxSteps[maxStepsIndex];
+                evaluator?.MarkAsDirty();
             }
             GUILayout.Label($"{MaxSteps[maxStepsIndex]}", styleLabel, GUILayout.Width(60));
             if (maxStepsIndex < MaxSteps.Length - 1 && GUILayout.Button("+", styleButtonSmall, GUILayout.Width(24)))
             {
                 maxStepsIndex++;
+                flightPlan.MaxStepsPerSegment = MaxSteps[maxStepsIndex];
+                evaluator?.MarkAsDirty();
             }
             GUILayout.EndHorizontal();
 
