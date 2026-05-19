@@ -23,6 +23,11 @@ namespace Galilego.Physics
         public double SphereOfInfluenceRadius;
         public double HillSphereRadius;
 
+        [Header("Visual Rotation")]
+        public Vector3 SubJupiterLocalDirection = Vector3.forward;
+        public Vector3 NorthLocalDirection = Vector3.up;
+        public float SubJupiterLongitudeOffsetDegrees;
+
         public void ApplyPeriapsisAndApoapsis()
         {
             if (PeriapsisDistance <= 0d || ApoapsisDistance <= 0d)

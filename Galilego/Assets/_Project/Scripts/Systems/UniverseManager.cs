@@ -81,6 +81,13 @@ namespace Galilego.Physics
         [Header("Visual Scale")]
         [SerializeField] private double visualDistanceMultiplier = 0.1d;
 
+        [Header("Body Rotation")]
+        [SerializeField] private bool rotateCelestialBodies = true;
+        [SerializeField] private double jupiterRotationPeriodSeconds = DefaultJupiterRotationPeriodSeconds;
+        [SerializeField] private Vector3 jupiterPrimeMeridianLocalDirection = Vector3.forward;
+        [SerializeField] private Vector3 jupiterNorthLocalDirection = Vector3.up;
+        [SerializeField] private float jupiterRotationOffsetDegrees;
+
         [Header("Simulation")]
         [SerializeField] private double simulationTimeSeconds;
         [SerializeField] private double timeScale = 1d;
@@ -166,6 +173,7 @@ namespace Galilego.Physics
         private const double MinimumOrbitMapSurfaceClearanceMeters = 50d;
         private const double MaximumOrbitMapSurfaceClearanceMeters = 2500d;
         private const double OrbitMapSurfaceClearanceRadiusFraction = 0.0002d;
+        private const double DefaultJupiterRotationPeriodSeconds = 35729.7d;
 
         public event Action<ReferenceFrameTarget> ActiveReferenceFrameChanged;
 
@@ -634,6 +642,18 @@ namespace Galilego.Physics
                 floatingOriginThreshold = 5000d;
             }
 
+            if (jupiterRotationPeriodSeconds <= 0d)
+            {
+                jupiterRotationPeriodSeconds = DefaultJupiterRotationPeriodSeconds;
+            }
+
+            jupiterRotationOffsetDegrees = NormalizeDegrees(jupiterRotationOffsetDegrees);
+            ValidateLocalReferenceAxes(
+                ref jupiterPrimeMeridianLocalDirection,
+                ref jupiterNorthLocalDirection,
+                Vector3.forward,
+                Vector3.up);
+
             if (ship != null && ship.VisualRadiusMeters <= 0d)
             {
                 ship.VisualRadiusMeters = 3d;
@@ -789,9 +809,21 @@ namespace Galilego.Physics
 
             for (int i = 0; i < moonRails.Count; i++)
             {
-                moonRails[i].ApplyPeriapsisAndApoapsis();
-                moonRails[i].SyncMassFromGravitationalParameter();
-                moonRails[i].UpdateInfluenceRadii(ResolveJupiterMassForInfluence());
+                MoonRail rail = moonRails[i];
+                if (rail == null)
+                {
+                    continue;
+                }
+
+                rail.ApplyPeriapsisAndApoapsis();
+                rail.SyncMassFromGravitationalParameter();
+                rail.UpdateInfluenceRadii(ResolveJupiterMassForInfluence());
+                rail.SubJupiterLongitudeOffsetDegrees = NormalizeDegrees(rail.SubJupiterLongitudeOffsetDegrees);
+                ValidateLocalReferenceAxes(
+                    ref rail.SubJupiterLocalDirection,
+                    ref rail.NorthLocalDirection,
+                    Vector3.forward,
+                    Vector3.up);
             }
 
             // Avoid creating GameObjects or calling SendMessage during OnValidate.
@@ -2137,6 +2169,41 @@ namespace Galilego.Physics
             return IsFinite(value) && value.sqrMagnitude > 1e-18f;
         }
 
+        private static void ValidateLocalReferenceAxes(
+            ref Vector3 forward,
+            ref Vector3 up,
+            Vector3 defaultForward,
+            Vector3 defaultUp)
+        {
+            if (!IsUsableDirection(defaultForward))
+            {
+                defaultForward = Vector3.forward;
+            }
+
+            if (!IsUsableDirection(defaultUp))
+            {
+                defaultUp = Vector3.up;
+            }
+
+            if (!IsUsableDirection(forward))
+            {
+                forward = defaultForward;
+            }
+
+            if (!IsUsableDirection(up))
+            {
+                up = defaultUp;
+            }
+
+            Vector3 normalizedForward = forward.normalized;
+            if (Mathf.Abs(Vector3.Dot(normalizedForward, up.normalized)) > 0.999f)
+            {
+                up = Mathf.Abs(Vector3.Dot(normalizedForward, Vector3.up)) > 0.999f
+                    ? Vector3.forward
+                    : Vector3.up;
+            }
+        }
+
         private static Quaternion CreateSafeLookRotation(Vector3 forward, Vector3 up, Quaternion fallback)
         {
             if (!IsUsableDirection(forward))
@@ -2328,7 +2395,7 @@ namespace Galilego.Physics
         [ContextMenu("Load JPL Galilean Moon Rails")]
         private void LoadJplGalileanMoonRails()
         {
-            Dictionary<string, Transform> existingVisuals = new Dictionary<string, Transform>(moonRails.Count, StringComparer.OrdinalIgnoreCase);
+            Dictionary<string, MoonRail> existingRails = new Dictionary<string, MoonRail>(moonRails.Count, StringComparer.OrdinalIgnoreCase);
 
             for (int i = 0; i < moonRails.Count; i++)
             {
@@ -2338,7 +2405,7 @@ namespace Galilego.Physics
                     continue;
                 }
 
-                existingVisuals[existingRail.Name] = existingRail.VisualTransform;
+                existingRails[existingRail.Name] = existingRail;
             }
 
             moonRails = GalileanMoonPresets.CreateJplGalileanMoons();
@@ -2346,9 +2413,12 @@ namespace Galilego.Physics
             for (int i = 0; i < moonRails.Count; i++)
             {
                 MoonRail rail = moonRails[i];
-                if (existingVisuals.TryGetValue(rail.Name, out Transform visualTransform))
+                if (existingRails.TryGetValue(rail.Name, out MoonRail existingRail))
                 {
-                    rail.VisualTransform = visualTransform;
+                    rail.VisualTransform = existingRail.VisualTransform;
+                    rail.SubJupiterLocalDirection = existingRail.SubJupiterLocalDirection;
+                    rail.NorthLocalDirection = existingRail.NorthLocalDirection;
+                    rail.SubJupiterLongitudeOffsetDegrees = existingRail.SubJupiterLongitudeOffsetDegrees;
                 }
             }
 
@@ -2392,6 +2462,7 @@ namespace Galilego.Physics
             // Apply visual scale for Jupiter and moons based on real radii
             ApplyVisualScale(jupiterTransform, jupiterRadius);
             ApplyVisualPosition(jupiterTransform, jupiterRealPosition);
+            ApplyJupiterVisualRotation();
             ConfigureCelestialBodyRenderers(jupiterTransform);
             
             if (jupiterTransform != null && nextJupiterLogTime <= Time.unscaledTime)
@@ -2454,6 +2525,102 @@ namespace Galilego.Physics
                 }
                 ApplyVisualPosition(moonOrbitRoot, framePos);
             }
+        }
+
+        private void ApplyJupiterVisualRotation()
+        {
+            if (!rotateCelestialBodies || jupiterTransform == null)
+            {
+                return;
+            }
+
+            Vector3 worldNorth = AstrodynamicNorthUnityDirection;
+            Vector3 worldPrimeMeridian = ResolveJupiterPrimeMeridianWorldDirection();
+            jupiterTransform.rotation = CreateRotationFromLocalFrameToWorld(
+                jupiterPrimeMeridianLocalDirection,
+                jupiterNorthLocalDirection,
+                worldPrimeMeridian,
+                worldNorth,
+                jupiterTransform.rotation);
+        }
+
+        private Vector3 ResolveJupiterPrimeMeridianWorldDirection()
+        {
+            double period = jupiterRotationPeriodSeconds > 0d
+                ? jupiterRotationPeriodSeconds
+                : DefaultJupiterRotationPeriodSeconds;
+            double rotationDegrees = ((simulationTimeSeconds / period) * 360d) + jupiterRotationOffsetDegrees;
+            double rotationRadians = DegreesToRadians(rotationDegrees);
+            Vector3d astrodynamicPrimeMeridian = new Vector3d(
+                Math.Cos(rotationRadians),
+                Math.Sin(rotationRadians),
+                0d);
+
+            return ToUnityDirection(ConvertAstrodynamicToSimulationFrame(astrodynamicPrimeMeridian));
+        }
+
+        private void ApplyTidallyLockedMoonVisualRotation(MoonRail rail, Transform visual, CelestialBody moonBody)
+        {
+            if (!rotateCelestialBodies || rail == null || visual == null || moonBody == null)
+            {
+                return;
+            }
+
+            Vector3 toJupiter = ToUnityDirection(jupiterRealPosition - moonBody.Position);
+            if (!IsUsableDirection(toJupiter))
+            {
+                return;
+            }
+
+            Vector3 subJupiterLocalAxis = IsUsableDirection(rail.SubJupiterLocalDirection)
+                ? rail.SubJupiterLocalDirection.normalized
+                : Vector3.forward;
+            Vector3 northLocalAxis = IsUsableDirection(rail.NorthLocalDirection)
+                ? rail.NorthLocalDirection.normalized
+                : Vector3.up;
+            Vector3 calibratedSubJupiterAxis =
+                Quaternion.AngleAxis(rail.SubJupiterLongitudeOffsetDegrees, northLocalAxis) *
+                subJupiterLocalAxis;
+
+            Quaternion lockedRotation = CreateRotationFromLocalFrameToWorld(
+                calibratedSubJupiterAxis,
+                northLocalAxis,
+                toJupiter,
+                ResolveMoonOrbitNormal(moonBody),
+                visual.rotation);
+
+            visual.rotation = lockedRotation;
+        }
+
+        private Vector3 ResolveMoonOrbitNormal(CelestialBody moonBody)
+        {
+            Vector3d relativePosition = moonBody.Position - jupiterRealPosition;
+            Vector3d angularMomentum = Vector3d.Cross(relativePosition, moonBody.Velocity);
+            Vector3 orbitNormal = ToUnityDirection(angularMomentum);
+            if (IsUsableDirection(orbitNormal))
+            {
+                return orbitNormal;
+            }
+
+            Vector3 fallbackNorth = AstrodynamicNorthUnityDirection;
+            return IsUsableDirection(fallbackNorth) ? fallbackNorth : Vector3.up;
+        }
+
+        private static Quaternion CreateRotationFromLocalFrameToWorld(
+            Vector3 localForward,
+            Vector3 localUp,
+            Vector3 worldForward,
+            Vector3 worldUp,
+            Quaternion fallback)
+        {
+            if (!IsUsableDirection(localForward) || !IsUsableDirection(worldForward))
+            {
+                return fallback;
+            }
+
+            Quaternion localFrame = CreateSafeLookRotation(localForward, localUp, Quaternion.identity);
+            Quaternion worldFrame = CreateSafeLookRotation(worldForward, worldUp, fallback);
+            return worldFrame * Quaternion.Inverse(localFrame);
         }
 
         private void ConfigureCelestialBodyRenderers(Transform target)
@@ -2806,6 +2973,8 @@ namespace Galilego.Physics
             Debug.Log($"[UniverseManager] Trajectory root: localPos={trajectoryVisualRoot.localPosition}, worldPos={trajectoryVisualRoot.position}, parent={visualParent.name}, parentPos={visualParent.position}, floatingOrigin={floatingOriginOffset.Magnitude:F0}m");
 
             // Moon orbits — sibling trajectoryVisualRoot, чтобы не было двойного смещения
+            trajectoryVisualRoot.gameObject.SetActive(ShouldShowAnyTrajectoryVisuals());
+
             if (moonOrbitRoot == null)
             {
                 moonOrbitRoot = FindChildByName(visualParent, "Moon_Orbits");
@@ -3207,6 +3376,32 @@ namespace Galilego.Physics
         private bool ShouldShowMoonOrbitVisuals()
         {
             return showMoonOrbits && cameraMode == SpaceCameraMode.OrbitMap;
+        }
+
+        private bool ShouldShowShipTrajectoryVisuals()
+        {
+            return showShipTrajectory && cameraMode == SpaceCameraMode.OrbitMap;
+        }
+
+        private bool ShouldShowAnyTrajectoryVisuals()
+        {
+            return ShouldShowShipTrajectoryVisuals() || ShouldShowMoonOrbitVisuals();
+        }
+
+        private void RefreshTrajectoryVisualVisibility()
+        {
+            bool shouldShowAny = ShouldShowAnyTrajectoryVisuals();
+            if (trajectoryVisualRoot != null)
+            {
+                trajectoryVisualRoot.gameObject.SetActive(shouldShowAny);
+            }
+
+            if (shipTrajectoryPredictor != null)
+            {
+                shipTrajectoryPredictor.gameObject.SetActive(ShouldShowShipTrajectoryVisuals());
+            }
+
+            UpdateMoonOrbitVisibility();
         }
 
         private void UpdateMoonOrbitVisibility()

@@ -107,14 +107,20 @@ namespace Galilego.Physics
         [SerializeField] private float minimumDirectionMagnitude = 1e-4f;
         [SerializeField] private bool driveBallTexture = true;
         [SerializeField] private bool alignToOrbitalFrame;
+        [SerializeField] private bool stabilizeBallRollAgainstOrbit = true;
         [SerializeField] private Vector3 shipLocalForward = Vector3.up;
         [SerializeField] private Vector3 shipLocalUp = Vector3.forward;
         [SerializeField] private bool flipBallVertical = true;
         [SerializeField] private Vector2 ballUvSize = new Vector2(0.42f, 0.42f);
 
+        private readonly List<AutopilotButtonBinding> autopilotButtonBindings = new List<AutopilotButtonBinding>();
+        private bool autopilotButtonsCreated;
+
         private void LateUpdate()
         {
             ResolveReferences();
+            EnsureAutopilotButtons();
+            RefreshAutopilotButtons();
 
             if (universeManager == null || shipOrientation == null)
             {
@@ -149,15 +155,14 @@ namespace Galilego.Physics
             Vector3 localEast = ResolveLocalEast(radialOut, localNorth);
             Quaternion displayRotation = ResolveDisplayRotation(radialOut, velocity, localNorth, localEast);
 
-            Vector3 ballRadialOut = radialOut;
-            Vector3 ballLocalEast = localEast;
+            ResolveBallReferenceBasis(radialOut, localNorth, out Vector3 ballRadialOut, out Vector3 ballLocalNorth, out Vector3 ballLocalEast);
             if (flipBallVertical)
             {
                 ballRadialOut = -ballRadialOut;
                 ballLocalEast = -ballLocalEast;
             }
 
-            UpdateBall(ballRadialOut, localNorth, ballLocalEast, displayRotation);
+            UpdateBall(ballRadialOut, ballLocalNorth, ballLocalEast, displayRotation);
 
             SetMarker(progradeMarker, velocity, displayRotation);
             SetMarker(retrogradeMarker, -velocity, displayRotation);
@@ -169,6 +174,16 @@ namespace Galilego.Physics
             SetMarker(southMarker, -localNorth, displayRotation);
             SetMarker(eastMarker, localEast, displayRotation);
             SetMarker(westMarker, -localEast, displayRotation);
+            SetMarkerWithLabel(selectedTargetMarker, selectedTargetLabel, -radialOut, displayRotation, frameName);
+            SetMarkerWithLabel(antiSelectedTargetMarker, antiSelectedTargetLabel, radialOut, displayRotation, $"Anti {frameName}");
+            UpdateDynamicMarkers(
+                frameName,
+                radialOut,
+                velocity,
+                normal,
+                localNorth,
+                localEast,
+                displayRotation);
 
             if (ball != null && ballSphere == null)
             {
@@ -214,6 +229,68 @@ namespace Galilego.Physics
             }
 
             return IsUsableDirection(localEast) ? localEast.normalized : Vector3.right;
+        }
+
+        private void ResolveBallReferenceBasis(
+            Vector3 orbitRadialOut,
+            Vector3 orbitLocalNorth,
+            out Vector3 ballRadialOut,
+            out Vector3 ballLocalNorth,
+            out Vector3 ballLocalEast)
+        {
+            if (stabilizeBallRollAgainstOrbit && TryResolveFixedBallReferenceBasis(out ballRadialOut, out ballLocalNorth, out ballLocalEast))
+            {
+                return;
+            }
+
+            ballRadialOut = orbitRadialOut;
+            ballLocalNorth = orbitLocalNorth;
+            ballLocalEast = ResolveLocalEast(orbitRadialOut, orbitLocalNorth);
+        }
+
+        private bool TryResolveFixedBallReferenceBasis(out Vector3 ballRadialOut, out Vector3 ballLocalNorth, out Vector3 ballLocalEast)
+        {
+            ballRadialOut = universeManager != null
+                ? universeManager.AstrodynamicNorthUnityDirection
+                : Vector3.up;
+
+            if (!IsUsableDirection(ballRadialOut))
+            {
+                ballRadialOut = Vector3.up;
+            }
+
+            ballRadialOut = ballRadialOut.normalized;
+
+            Vector3 preferredNorth = universeManager != null
+                ? universeManager.AstrodynamicEastUnityDirection
+                : Vector3.forward;
+
+            ballLocalNorth = Vector3.ProjectOnPlane(preferredNorth, ballRadialOut);
+            if (!IsUsableDirection(ballLocalNorth))
+            {
+                ballLocalNorth = Vector3.ProjectOnPlane(Vector3.forward, ballRadialOut);
+            }
+
+            if (!IsUsableDirection(ballLocalNorth))
+            {
+                ballLocalNorth = Vector3.ProjectOnPlane(Vector3.right, ballRadialOut);
+            }
+
+            if (!IsUsableDirection(ballLocalNorth))
+            {
+                ballLocalEast = Vector3.zero;
+                return false;
+            }
+
+            ballLocalNorth = ballLocalNorth.normalized;
+            ballLocalEast = Vector3.Cross(ballLocalNorth, ballRadialOut);
+            if (!IsUsableDirection(ballLocalEast))
+            {
+                return false;
+            }
+
+            ballLocalEast = ballLocalEast.normalized;
+            return true;
         }
 
         private Quaternion ResolveDisplayRotation(Vector3 radialOut, Vector3 velocity, Vector3 localNorth, Vector3 localEast)
@@ -263,6 +340,185 @@ namespace Galilego.Physics
             return IsUsableDirection(displayUp)
                 ? Quaternion.LookRotation(shipForward.normalized, displayUp.normalized)
                 : shipOrientation.rotation;
+        }
+
+        private void UpdateDynamicMarkers(
+            string frameName,
+            Vector3 radialOut,
+            Vector3 velocity,
+            Vector3 normal,
+            Vector3 localNorth,
+            Vector3 localEast,
+            Quaternion displayRotation)
+        {
+            if (dynamicMarkers == null)
+            {
+                return;
+            }
+
+            for (int i = 0; i < dynamicMarkers.Length; i++)
+            {
+                DirectionalMarker marker = dynamicMarkers[i];
+                if (marker == null)
+                {
+                    continue;
+                }
+
+                if (!TryResolveMarkerDirection(
+                    marker.Direction,
+                    marker.BodyTarget,
+                    radialOut,
+                    velocity,
+                    normal,
+                    localNorth,
+                    localEast,
+                    out Vector3 direction,
+                    out string bodyName))
+                {
+                    SetMarkerWithLabelActive(marker.Marker, marker.Label, false);
+                    continue;
+                }
+
+                string label = ResolveMarkerLabel(marker, frameName, bodyName);
+                SetMarkerWithLabel(marker.Marker, marker.Label, direction, displayRotation, label);
+            }
+        }
+
+        private bool TryResolveMarkerDirection(
+            NavballDirectionMode markerDirection,
+            ReferenceFrameTarget bodyTarget,
+            Vector3 radialOut,
+            Vector3 velocity,
+            Vector3 normal,
+            Vector3 localNorth,
+            Vector3 localEast,
+            out Vector3 direction,
+            out string bodyName)
+        {
+            bodyName = bodyTarget.ToString();
+
+            switch (markerDirection)
+            {
+                case NavballDirectionMode.Prograde:
+                    direction = velocity;
+                    return true;
+                case NavballDirectionMode.Retrograde:
+                    direction = -velocity;
+                    return true;
+                case NavballDirectionMode.RadialOut:
+                    direction = radialOut;
+                    return true;
+                case NavballDirectionMode.RadialIn:
+                case NavballDirectionMode.SelectedTarget:
+                    direction = -radialOut;
+                    return true;
+                case NavballDirectionMode.Normal:
+                    direction = normal;
+                    return true;
+                case NavballDirectionMode.AntiNormal:
+                    direction = -normal;
+                    return true;
+                case NavballDirectionMode.North:
+                    direction = localNorth;
+                    return true;
+                case NavballDirectionMode.East:
+                    direction = localEast;
+                    return true;
+                case NavballDirectionMode.South:
+                    direction = -localNorth;
+                    return true;
+                case NavballDirectionMode.West:
+                    direction = -localEast;
+                    return true;
+                case NavballDirectionMode.AntiSelectedTarget:
+                    direction = radialOut;
+                    return true;
+                case NavballDirectionMode.Body:
+                    return TryGetBodyDirection(bodyTarget, false, out direction, out bodyName);
+                case NavballDirectionMode.AntiBody:
+                    return TryGetBodyDirection(bodyTarget, true, out direction, out bodyName);
+                default:
+                    direction = Vector3.zero;
+                    return false;
+            }
+        }
+
+        private bool TryGetBodyDirection(
+            ReferenceFrameTarget bodyTarget,
+            bool invert,
+            out Vector3 direction,
+            out string bodyName)
+        {
+            direction = Vector3.zero;
+            bodyName = bodyTarget.ToString();
+
+            if (universeManager == null || universeManager.ShipBody == null)
+            {
+                return false;
+            }
+
+            if (!universeManager.TryGetReferenceState(
+                bodyTarget,
+                out bodyName,
+                out Vector3d bodyPosition,
+                out _,
+                out _,
+                out _,
+                out _))
+            {
+                return false;
+            }
+
+            Vector3d realDirection = bodyPosition - universeManager.ShipBody.Position;
+            direction = ToUnityDirection(invert ? -realDirection : realDirection);
+            return IsUsableDirection(direction);
+        }
+
+        private string ResolveMarkerLabel(DirectionalMarker marker, string frameName, string bodyName)
+        {
+            if (marker == null)
+            {
+                return string.Empty;
+            }
+
+            if (!string.IsNullOrWhiteSpace(marker.LabelOverride))
+            {
+                return marker.LabelOverride;
+            }
+
+            switch (marker.Direction)
+            {
+                case NavballDirectionMode.Prograde:
+                    return "Prograde";
+                case NavballDirectionMode.Retrograde:
+                    return "Retrograde";
+                case NavballDirectionMode.RadialOut:
+                    return "Out";
+                case NavballDirectionMode.RadialIn:
+                    return "In";
+                case NavballDirectionMode.Normal:
+                    return "Normal";
+                case NavballDirectionMode.AntiNormal:
+                    return "Anti-normal";
+                case NavballDirectionMode.North:
+                    return "N";
+                case NavballDirectionMode.East:
+                    return "E";
+                case NavballDirectionMode.South:
+                    return "S";
+                case NavballDirectionMode.West:
+                    return "W";
+                case NavballDirectionMode.SelectedTarget:
+                    return frameName;
+                case NavballDirectionMode.AntiSelectedTarget:
+                    return $"Anti {frameName}";
+                case NavballDirectionMode.Body:
+                    return bodyName;
+                case NavballDirectionMode.AntiBody:
+                    return $"Anti {bodyName}";
+                default:
+                    return string.Empty;
+            }
         }
 
         private Vector3 TransformShipAxis(Vector3 localAxis, Vector3 fallbackWorldAxis)
@@ -355,6 +611,24 @@ namespace Galilego.Physics
                 : Vector3.zero;
         }
 
+        private void SetMarkerWithLabel(RectTransform marker, TMP_Text label, Vector3 worldDirection, Quaternion displayRotation, string text)
+        {
+            if (label != null)
+            {
+                label.text = text;
+            }
+
+            RectTransform labelTransform = label != null ? label.rectTransform : null;
+            RectTransform markerTransform = marker != null ? marker : labelTransform;
+
+            SetMarker(markerTransform, worldDirection, displayRotation);
+
+            if (marker != null && labelTransform != null && labelTransform != marker && !labelTransform.IsChildOf(marker))
+            {
+                SetMarker(labelTransform, worldDirection, displayRotation);
+            }
+        }
+
         private void SetMarker(RectTransform marker, Vector3 worldDirection, Quaternion displayRotation)
         {
             if (marker == null)
@@ -400,6 +674,9 @@ namespace Galilego.Physics
             SetMarkerActive(eastMarker, false);
             SetMarkerActive(southMarker, false);
             SetMarkerActive(westMarker, false);
+            SetMarkerWithLabelActive(selectedTargetMarker, selectedTargetLabel, false);
+            SetMarkerWithLabelActive(antiSelectedTargetMarker, antiSelectedTargetLabel, false);
+            HideDynamicMarkers();
         }
 
         private static void SetMarkerActive(RectTransform marker, bool active)
@@ -407,6 +684,36 @@ namespace Galilego.Physics
             if (marker != null)
             {
                 marker.gameObject.SetActive(active);
+            }
+        }
+
+        private static void SetMarkerWithLabelActive(RectTransform marker, TMP_Text label, bool active)
+        {
+            RectTransform labelTransform = label != null ? label.rectTransform : null;
+            RectTransform markerTransform = marker != null ? marker : labelTransform;
+
+            SetMarkerActive(markerTransform, active);
+
+            if (marker != null && labelTransform != null && labelTransform != marker && !labelTransform.IsChildOf(marker))
+            {
+                SetMarkerActive(labelTransform, active);
+            }
+        }
+
+        private void HideDynamicMarkers()
+        {
+            if (dynamicMarkers == null)
+            {
+                return;
+            }
+
+            for (int i = 0; i < dynamicMarkers.Length; i++)
+            {
+                DirectionalMarker marker = dynamicMarkers[i];
+                if (marker != null)
+                {
+                    SetMarkerWithLabelActive(marker.Marker, marker.Label, false);
+                }
             }
         }
 
