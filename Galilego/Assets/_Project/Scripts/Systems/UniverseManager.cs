@@ -275,6 +275,58 @@ namespace Galilego.Physics
             }
 
             RefreshTrajectoryLineStyles();
+            EnforceTrajectoryVisibility();
+        }
+
+        private void EnforceTrajectoryVisibility()
+        {
+            bool shouldShow = cameraMode == SpaceCameraMode.OrbitMap;
+            
+            // Основная логика - прячем весь корень траекторий
+            if (trajectoryVisualRoot != null)
+            {
+                if (trajectoryVisualRoot.gameObject.activeSelf != shouldShow)
+                {
+                    trajectoryVisualRoot.gameObject.SetActive(shouldShow);
+                }
+            }
+            
+            // КРИТИЧНО: Управляем видимостью траектории корабля
+            // shipTrajectoryPredictor является дочерним объектом trajectoryVisualRoot,
+            // но нужно дополнительно проверить условия видимости
+            if (shipTrajectoryPredictor != null)
+            {
+                bool shouldShowShipTrajectory = showShipTrajectory && shouldShow;
+                
+                // Проверяем наличие манёвров только если нужно показать траекторию
+                if (shouldShowShipTrajectory && shouldShow)
+                {
+                    var evaluator = FindAnyObjectByType<ManeuverEvaluator>();
+                    if (evaluator != null)
+                    {
+                        var flightPlan = evaluator.GetFlightPlan();
+                        if (flightPlan != null && flightPlan.Nodes.Count > 0)
+                        {
+                            shouldShowShipTrajectory = false;
+                        }
+                    }
+                }
+                
+                if (shipTrajectoryPredictor.gameObject.activeSelf != shouldShowShipTrajectory)
+                {
+                    shipTrajectoryPredictor.gameObject.SetActive(shouldShowShipTrajectory);
+                }
+            }
+            
+            // Управляем видимостью орбит лун
+            if (moonOrbitRoot != null)
+            {
+                bool shouldShowMoonOrbits = showMoonOrbits && shouldShow;
+                if (moonOrbitRoot.gameObject.activeSelf != shouldShowMoonOrbits)
+                {
+                    moonOrbitRoot.gameObject.SetActive(shouldShowMoonOrbits);
+                }
+            }
         }
 
         private void OnGUI()
@@ -1465,12 +1517,9 @@ namespace Galilego.Physics
         {
             celestialCamera.enabled = true;
             int shipVisualLayer = ResolveShipVisualLayer();
-            celestialCamera.cullingMask = BuildLayerMaskIncludingLayer(
-                shipVisualLayer,
-                "Default",
-                "Celestial",
-                "Trajectory",
-                "Ship");
+            celestialCamera.cullingMask = cameraMode == SpaceCameraMode.OrbitMap
+                ? BuildLayerMaskIncludingLayer(shipVisualLayer, "Default", "Celestial", "Trajectory", "Ship")
+                : BuildLayerMaskIncludingLayer(shipVisualLayer, "Default", "Celestial", "Ship");
             celestialCamera.eventMask = 0;
 
             AudioListener celestialListener = celestialCamera.GetComponent<AudioListener>();
@@ -3015,7 +3064,8 @@ namespace Galilego.Physics
                 }
             }
 
-            if (!showShipTrajectory || hideForManeuverOrbitMap)
+            // Скрываем орбиту аппарата в режиме камеры корабля и в OrbitMap с манёврами
+            if (!showShipTrajectory || cameraMode != SpaceCameraMode.OrbitMap || hideForManeuverOrbitMap)
             {
                 if (shipTrajectoryPredictor != null)
                 {

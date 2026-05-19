@@ -72,6 +72,10 @@ namespace Galilego.Gameplay
             if (universeManager == null)
                 universeManager = FindAnyObjectByType<UniverseManager>();
 
+            // Disable the required LineRenderer — we use child LineRenderers for segments
+            var ownRenderer = GetComponent<LineRenderer>();
+            if (ownRenderer != null) ownRenderer.enabled = false;
+
             if (!IsInvoking(nameof(RequestRecalculation)))
             {
                 float jitter = UnityEngine.Random.Range(0f, 0.5f);
@@ -108,9 +112,13 @@ namespace Galilego.Gameplay
 
             foreach (var line in segmentLines)
             {
-                if (line != null && line.gameObject.activeSelf != showLines && line.positionCount > 0)
+                if (line != null && line.positionCount > 0)
                 {
-                    line.gameObject.SetActive(showLines);
+                    // ПРИНУДИТЕЛЬНО устанавливаем видимость каждый кадр
+                    if (line.gameObject.activeSelf != showLines)
+                    {
+                        line.gameObject.SetActive(showLines);
+                    }
                 }
 
                 if (showLines && line != null && line.positionCount > 1)
@@ -126,7 +134,11 @@ namespace Galilego.Gameplay
 
             if (timeMarkerInstance != null)
             {
-                timeMarkerInstance.SetActive(showLines);
+                // ПРИНУДИТЕЛЬНО устанавливаем видимость маркера
+                if (timeMarkerInstance.activeSelf != showLines)
+                {
+                    timeMarkerInstance.SetActive(showLines);
+                }
             }
         }
 
@@ -468,6 +480,9 @@ namespace Galilego.Gameplay
             CompleteBackBuffer(totalPoints);
             Debug.Log($"[ManeuverEvaluator] Trajectory calculation complete: {totalPoints} points generated");
             calculationCoroutine = null;
+
+            // Immediately hide lines if not in OrbitMap (ShipFocus mode should never show trajectory lines)
+            UpdateVisibility();
         }
 
         /// <summary>
@@ -753,10 +768,18 @@ namespace Galilego.Gameplay
         {
             Transform parent = null;
             if (universeManager != null && universeManager.TrajectoryVisualRoot != null)
+            {
                 parent = universeManager.TrajectoryVisualRoot;
+                Debug.Log($"[ManeuverEvaluator] Using TrajectoryVisualRoot as parent: {parent.name}");
+            }
             else
+            {
                 parent = transform;
-                
+                Debug.LogWarning($"[ManeuverEvaluator] FALLBACK: TrajectoryVisualRoot is null! Using ManeuverEvaluator as parent. " +
+                                $"universeManager={(universeManager != null ? "exists" : "NULL")}, " +
+                                $"TrajectoryVisualRoot={(universeManager?.TrajectoryVisualRoot != null ? "exists" : "NULL")}");
+            }
+            
             Debug.Log($"[ManeuverEvaluator] Trajectory parent: {parent.name}, position: {parent.position}, localPosition: {parent.localPosition}");
             return parent;
         }
