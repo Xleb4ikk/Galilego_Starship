@@ -37,7 +37,6 @@ namespace Galilego.Physics
         [SerializeField] private double jupiterStandardGravitationalParameter = 1.266865319e17d;
         [SerializeField] private double jupiterRadius = 6.9911e7d;
         [SerializeField] private Vector3d jupiterRealPosition = Vector3d.Zero;
-        [SerializeField] private Vector3 jupiterNorthLocalDirection = Vector3.up;
 
         [Header("Ship")]
         [SerializeField] private ShipSettings ship = new ShipSettings();
@@ -2608,39 +2607,6 @@ namespace Galilego.Physics
             return ToUnityDirection(ConvertAstrodynamicToSimulationFrame(astrodynamicPrimeMeridian));
         }
 
-        private void ApplyTidallyLockedMoonVisualRotation(MoonRail rail, Transform visual, CelestialBody moonBody)
-        {
-            if (!rotateCelestialBodies || rail == null || visual == null || moonBody == null)
-            {
-                return;
-            }
-
-            Vector3 toJupiter = ToUnityDirection(jupiterRealPosition - moonBody.Position);
-            if (!IsUsableDirection(toJupiter))
-            {
-                return;
-            }
-
-            Vector3 subJupiterLocalAxis = IsUsableDirection(rail.SubJupiterLocalDirection)
-                ? rail.SubJupiterLocalDirection.normalized
-                : Vector3.forward;
-            Vector3 northLocalAxis = IsUsableDirection(rail.NorthLocalDirection)
-                ? rail.NorthLocalDirection.normalized
-                : Vector3.up;
-            Vector3 calibratedSubJupiterAxis =
-                Quaternion.AngleAxis(rail.SubJupiterLongitudeOffsetDegrees, northLocalAxis) *
-                subJupiterLocalAxis;
-
-            Quaternion lockedRotation = CreateRotationFromLocalFrameToWorld(
-                calibratedSubJupiterAxis,
-                northLocalAxis,
-                toJupiter,
-                ResolveMoonOrbitNormal(moonBody),
-                visual.rotation);
-
-            visual.rotation = lockedRotation;
-        }
-
         private Vector3 ResolveMoonOrbitNormal(CelestialBody moonBody)
         {
             Vector3d relativePosition = moonBody.Position - jupiterRealPosition;
@@ -3745,6 +3711,43 @@ namespace Galilego.Physics
             }
 
             return null;
+        }
+
+        public int MoonRailCount => moonRails != null ? moonRails.Count : 0;
+
+        public double JupiterSGP => jupiterStandardGravitationalParameter;
+
+        public Vector3d JupiterPosition => jupiterRealPosition;
+
+        public AstrodynamicPlaneMapping CurrentPlaneMapping => astrodynamicPlaneMapping;
+
+        public int FillMoonOrbitData(Gameplay.MoonOrbitData[] output, int offset, int count, double snapshotTime)
+        {
+            if (moonRails == null || output == null) return 0;
+            int maxCount = Math.Min(count, moonRails.Count - offset);
+            if (maxCount <= 0) return 0;
+
+            for (int i = 0; i < maxCount; i++)
+            {
+                var rail = moonRails[offset + i];
+                double sma = Math.Max(rail.ResolveSemiMajorAxis(), 1.0);
+                double ecc = Math.Max(0.0, Math.Min(rail.ResolveEccentricity(), 0.999));
+                double combinedMu = jupiterStandardGravitationalParameter + rail.ResolveStandardGravitationalParameter();
+
+                output[i] = new Gameplay.MoonOrbitData
+                {
+                    SemiMajorAxis = sma,
+                    Eccentricity = ecc,
+                    InclinationRad = rail.InclinationDegrees * (Math.PI / 180.0),
+                    AscendingNodeRad = rail.LongitudeOfAscendingNodeDegrees * (Math.PI / 180.0),
+                    PeriapsisArgRad = rail.ArgumentOfPeriapsisDegrees * (Math.PI / 180.0),
+                    MeanAnomalyAtEpochRad = rail.MeanAnomalyAtEpochDegrees * (Math.PI / 180.0),
+                    EpochTimeSeconds = rail.EpochTimeSeconds,
+                    GravitationalParameter = combinedMu,
+                    StandardGravitationalParameter = rail.ResolveStandardGravitationalParameter()
+                };
+            }
+            return maxCount;
         }
     }
 }
