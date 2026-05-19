@@ -1179,7 +1179,6 @@ MonoBehaviour:
   minimumDirectionMagnitude: 0.0001
   driveBallTexture: 1
   alignToOrbitalFrame: 0
-  stabilizeBallRollAgainstOrbit: 1
   shipLocalForward: {x: 0, y: 1, z: 0}
   shipLocalUp: {x: 0, y: 0, z: 1}
   flipBallVertical: 1
@@ -1998,6 +1997,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::Galilego.Gameplay.FlightPlanUI
   evaluator: {fileID: 861880901}
+  orbitAnalyzer: {fileID: 0}
   windowRect:
     serializedVersion: 2
     x: 16
@@ -2006,7 +2006,8 @@ MonoBehaviour:
     height: 600
   showWindow: 1
   toggleKey: 110
-  maxDragRate: 100
+  showSettings: 0
+  showGuidance: 0
 --- !u!1 &701479627
 GameObject:
   m_ObjectHideFlags: 0
@@ -2531,12 +2532,17 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::Galilego.Gameplay.ManeuverEvaluator
   universeManager: {fileID: 0}
-  lineRendererPrefab: {fileID: 0}
   timeMarkerPrefab: {fileID: 0}
-  maxStepsPerFrame: 256
-  debounceTime: 0.15
   predictionStepSeconds: 5
   maxPredictionSubstepSeconds: 0
+  maxSubstepsPerSegment: 256
+  maxTrajectoryPoints: 2000
+  defaultPredictionLengthSeconds: 7200
+  maxPredictionLengthSeconds: 86400
+  maxStepsPerFrame: 256
+  forceSynchronousCalculation: 0
+  debounceTime: 0.15
+  maxPointsPerLine: 512
 --- !u!120 &861880902
 LineRenderer:
   serializedVersion: 3
@@ -4951,6 +4957,7 @@ MonoBehaviour:
     X: 0
     Y: 0
     Z: 0
+  jupiterNorthLocalDirection: {x: 0, y: 1, z: 0}
   ship:
     VisualTransform: {fileID: 1390413975}
     Mass: 1000
@@ -4980,9 +4987,6 @@ MonoBehaviour:
     EpochTimeSeconds: 0
     SphereOfInfluenceRadius: 7836288.860561896
     HillSphereRadius: 10515470.593136963
-    SubJupiterLocalDirection: {x: 0, y: 0, z: 1}
-    NorthLocalDirection: {x: 0, y: 1, z: 0}
-    SubJupiterLongitudeOffsetDegrees: 0
   - Name: Europa
     VisualTransform: {fileID: 1940997418}
     StandardGravitationalParameter: 3202712100000
@@ -4999,9 +5003,6 @@ MonoBehaviour:
     EpochTimeSeconds: 0
     SphereOfInfluenceRadius: 9725282.378132932
     HillSphereRadius: 13533692.132135233
-    SubJupiterLocalDirection: {x: 0, y: 0, z: 1}
-    NorthLocalDirection: {x: 0, y: 1, z: 0}
-    SubJupiterLongitudeOffsetDegrees: 0
   - Name: Ganymede
     VisualTransform: {fileID: 145397906}
     StandardGravitationalParameter: 9887832750000
@@ -5018,9 +5019,6 @@ MonoBehaviour:
     EpochTimeSeconds: 0
     SphereOfInfluenceRadius: 24349742.127235938
     HillSphereRadius: 31685560.351326723
-    SubJupiterLocalDirection: {x: 0, y: 0, z: 1}
-    NorthLocalDirection: {x: 0, y: 1, z: 0}
-    SubJupiterLongitudeOffsetDegrees: 0
   - Name: Callisto
     VisualTransform: {fileID: 1516021722}
     StandardGravitationalParameter: 7179283400000
@@ -5037,9 +5035,6 @@ MonoBehaviour:
     EpochTimeSeconds: 0
     SphereOfInfluenceRadius: 37680910.00701851
     HillSphereRadius: 49789775.66815525
-    SubJupiterLocalDirection: {x: 0, y: 0, z: 1}
-    NorthLocalDirection: {x: 0, y: 1, z: 0}
-    SubJupiterLongitudeOffsetDegrees: 0
   worldContainer: {fileID: 1581560979}
   celestialCamera: {fileID: 330585545}
   shipOverlayCamera: {fileID: 1077664056}
@@ -5068,11 +5063,6 @@ MonoBehaviour:
   cameraZoomSmoothing: 10
   orbitMapFocusTarget: 0
   visualDistanceMultiplier: 0.1
-  rotateCelestialBodies: 1
-  jupiterRotationPeriodSeconds: 35729.7
-  jupiterPrimeMeridianLocalDirection: {x: 0, y: 0, z: 1}
-  jupiterNorthLocalDirection: {x: 0, y: 1, z: 0}
-  jupiterRotationOffsetDegrees: 0
   simulationTimeSeconds: 0
   timeScale: 1
   maxSolverStepSeconds: 1
@@ -5095,6 +5085,7 @@ MonoBehaviour:
   moonOrbitScreenWidth: 3
   moonOrbitTailAlpha: 1
   moonOrbitAheadAlpha: 0.08
+  moonOrbitHistoryFraction: 1
   shipTrajectoryColor: {r: 0.25, g: 0.95, b: 1, a: 0.95}
   moonOrbitColor: {r: 0.65, g: 0.85, b: 1, a: 0.4}
   showTelemetryOverlay: 1
