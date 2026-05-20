@@ -20,8 +20,7 @@ public class SpaceRotation : MonoBehaviour
 
     void Start()
     {
-        Debug.Log($"[SpaceRotation] Запущен на '{gameObject.name}' | force={rotationForce} damping={damping}");
-        Debug.Log("[SpaceRotation] Управление: W/S=ОсьX  A/D=ОсьY  Q/E=ОсьZ  Space=Стоп");
+        // Silent start — avoid log spam during performance-sensitive runs
     }
 
     void Update()
@@ -33,11 +32,7 @@ public class SpaceRotation : MonoBehaviour
     void HandleInput()
     {
         var kb = Keyboard.current;
-        if (kb == null)
-        {
-            Debug.LogWarning("[SpaceRotation] Клавиатура не найдена!");
-            return;
-        }
+        if (kb == null) return;
 
         float force = rotationForce * Time.deltaTime;
 
@@ -45,49 +40,51 @@ public class SpaceRotation : MonoBehaviour
         if (kb.wKey.isPressed)
         {
             _angularVelocity.x -= force;
-            Debug.Log($"[SpaceRotation] W нажата → X velocity: {_angularVelocity.x:F2}");
         }
         if (kb.sKey.isPressed)
         {
             _angularVelocity.x += force;
-            Debug.Log($"[SpaceRotation] S нажата → X velocity: {_angularVelocity.x:F2}");
         }
 
         // Ось Y
         if (kb.aKey.isPressed)
         {
             _angularVelocity.y -= force;
-            Debug.Log($"[SpaceRotation] A нажата → Y velocity: {_angularVelocity.y:F2}");
         }
         if (kb.dKey.isPressed)
         {
             _angularVelocity.y += force;
-            Debug.Log($"[SpaceRotation] D нажата → Y velocity: {_angularVelocity.y:F2}");
         }
 
         // Ось Z
         if (kb.qKey.isPressed)
         {
             _angularVelocity.z += force;
-            Debug.Log($"[SpaceRotation] Q нажата → Z velocity: {_angularVelocity.z:F2}");
         }
         if (kb.eKey.isPressed)
         {
             _angularVelocity.z -= force;
-            Debug.Log($"[SpaceRotation] E нажата → Z velocity: {_angularVelocity.z:F2}");
         }
 
         // Стоп
         if (kb.spaceKey.wasPressedThisFrame)
         {
-            Debug.Log("[SpaceRotation] СТОП — угловая скорость сброшена");
             Stop();
         }
     }
 
     void ApplyInertia()
     {
-        if (_angularVelocity.magnitude > 0.01f)
+        // If angular velocity components became invalid, reset to safe state
+        if (float.IsNaN(_angularVelocity.x) || float.IsNaN(_angularVelocity.y) || float.IsNaN(_angularVelocity.z) ||
+            float.IsInfinity(_angularVelocity.x) || float.IsInfinity(_angularVelocity.y) || float.IsInfinity(_angularVelocity.z))
+        {
+            _angularVelocity = Vector3.zero;
+            return;
+        }
+
+        // Use squared magnitude check to avoid an expensive sqrt call
+        if (_angularVelocity.sqrMagnitude > 0.0001f)
         {
             transform.Rotate(
                 _angularVelocity.x * Time.deltaTime,
@@ -103,7 +100,6 @@ public class SpaceRotation : MonoBehaviour
     public void AddTorque(Vector3 torque)
     {
         _angularVelocity += torque;
-        Debug.Log($"[SpaceRotation] AddTorque: {torque} → velocity: {_angularVelocity}");
     }
 
     public void Stop()
