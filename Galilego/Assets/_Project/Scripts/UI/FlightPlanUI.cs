@@ -50,6 +50,7 @@ namespace Galilego.Gameplay
         private UniverseManager universeManager;
 
         // Состояние
+        private bool scrubWasActive;
         private int? firstFutureManeuver;
         private int numberOfAnomalousManeuvers;
         private bool reachedDeadline;
@@ -66,6 +67,7 @@ namespace Galilego.Gameplay
 
         // Scrub state
         private float predictionScrubValue = 0f;
+        private float moonHistoryScrubValue = 0f;
 
         // Статус ошибки
         private ManeuverStatus currentStatus = ManeuverStatus.OK;
@@ -164,15 +166,37 @@ namespace Galilego.Gameplay
             if (Mathf.Abs(predictionScrubValue) > 0.01f && flightPlan != null)
             {
                 double length = flightPlan.PredictionLengthSeconds;
-                double mag = predictionScrubValue * predictionScrubValue;
-                double effectivePos = predictionScrubValue > 0 ? mag : -mag;
-                double rate = length * effectivePos * 2.0;
+                double v = predictionScrubValue;
+                double effectivePos = v > 0 ? v * v : -(v * v);
+                double rate = (100.0 + System.Math.Sqrt(length) * 15.0) * effectivePos;
                 double newLength = Math.Max(60.0, Math.Min(315360000.0, length + rate * Time.unscaledDeltaTime));
                 var result = flightPlan.SetDesiredFinalTime(newLength);
                 if (result.IsOk)
                 {
                     evaluator?.MarkAsDirtyLightweight();
                 }
+            }
+
+            // Moon orbit history scrub (centered spring-loaded slider)
+            if (Mathf.Abs(moonHistoryScrubValue) > 0.01f && universeManager != null)
+            {
+                float v = moonHistoryScrubValue;
+                float effectivePos = v > 0f ? v * v : -(v * v);
+                float rate = effectivePos * 12f; // days per second, quadratic for finer control near center
+                float newDays = Mathf.Clamp(universeManager.MoonOrbitHistoryDays + rate * Time.unscaledDeltaTime, 0.0007f, 365f);
+                universeManager.MoonOrbitHistoryDays = newDays;
+            }
+
+            // Reset scrub when mouse released anywhere (not just inside window)
+#if ENABLE_INPUT_SYSTEM
+            if (UnityEngine.InputSystem.Mouse.current != null &&
+                UnityEngine.InputSystem.Mouse.current.leftButton.wasReleasedThisFrame)
+#else
+            if (Input.GetMouseButtonUp(0))
+#endif
+            {
+                predictionScrubValue = 0f;
+                moonHistoryScrubValue = 0f;
             }
 
             // Update prediction offset
@@ -230,6 +254,17 @@ namespace Galilego.Gameplay
         // ─── Flight plan controls ───────────────────────────────────────────────
         private void DrawFlightPlanControls()
         {
+            // Track scrub activity — only release hotControl if scrub was active
+            if (Mathf.Abs(predictionScrubValue) > 0.01f)
+                scrubWasActive = true;
+
+            if (scrubWasActive && Mathf.Abs(predictionScrubValue) < 0.001f)
+            {
+                if (GUIUtility.hotControl != 0)
+                    GUIUtility.hotControl = 0;
+                scrubWasActive = false;
+            }
+
             GUILayout.BeginVertical(styleSection);
             GUILayout.Label("FLIGHT PLAN", styleHeader);
 
@@ -242,18 +277,23 @@ namespace Galilego.Gameplay
             GUILayout.FlexibleSpace();
             GUILayout.EndHorizontal();
 
-            // Preset time buttons
+            // Step buttons: decrement row
             GUILayout.BeginHorizontal();
-            if (GUILayout.Button("1h", styleButtonSmall)) ApplyPredictionLength(3600);
-            if (GUILayout.Button("6h", styleButtonSmall)) ApplyPredictionLength(21600);
-            if (GUILayout.Button("1d", styleButtonSmall)) ApplyPredictionLength(86400);
-            if (GUILayout.Button("7d", styleButtonSmall)) ApplyPredictionLength(604800);
-            if (GUILayout.Button("30d", styleButtonSmall)) ApplyPredictionLength(2592000);
+            if (GUILayout.Button("−1h", styleButtonSmall)) ApplyPredictionDelta(-3600);
+            if (GUILayout.Button("−1d", styleButtonSmall)) ApplyPredictionDelta(-86400);
+            if (GUILayout.Button("−10d", styleButtonSmall)) ApplyPredictionDelta(-864000);
+            if (GUILayout.Button("−30d", styleButtonSmall)) ApplyPredictionDelta(-2592000);
+            if (GUILayout.Button("−180d", styleButtonSmall)) ApplyPredictionDelta(-15552000);
+            if (GUILayout.Button("−1y", styleButtonSmall)) ApplyPredictionDelta(-31557600);
             GUILayout.EndHorizontal();
+            // Step buttons: increment row
             GUILayout.BeginHorizontal();
-            if (GUILayout.Button("1y", styleButtonSmall)) ApplyPredictionLength(31557600);
-            if (GUILayout.Button("10y", styleButtonSmall)) ApplyPredictionLength(315360000);
-            GUILayout.FlexibleSpace();
+            if (GUILayout.Button("+1h", styleButtonSmall)) ApplyPredictionDelta(3600);
+            if (GUILayout.Button("+1d", styleButtonSmall)) ApplyPredictionDelta(86400);
+            if (GUILayout.Button("+10d", styleButtonSmall)) ApplyPredictionDelta(864000);
+            if (GUILayout.Button("+30d", styleButtonSmall)) ApplyPredictionDelta(2592000);
+            if (GUILayout.Button("+180d", styleButtonSmall)) ApplyPredictionDelta(15552000);
+            if (GUILayout.Button("+1y", styleButtonSmall)) ApplyPredictionDelta(31557600);
             GUILayout.EndHorizontal();
 
             // Centered scrub slider (spring-loaded)
@@ -262,11 +302,6 @@ namespace Galilego.Gameplay
             predictionScrubValue = GUILayout.HorizontalSlider(predictionScrubValue, -1f, 1f);
             GUILayout.Label("▶", styleLabelDim, GUILayout.Width(14));
             GUILayout.EndHorizontal();
-
-            if (Event.current.type == EventType.MouseUp)
-            {
-                predictionScrubValue = 0f;
-            }
 
             GUILayout.EndVertical();
         }
@@ -283,6 +318,14 @@ namespace Galilego.Gameplay
             {
                 UpdateStatus(result.Status, result.Message);
             }
+        }
+
+        private void ApplyPredictionDelta(double deltaSeconds)
+        {
+            double current = flightPlan.PredictionLengthSeconds;
+            double newLength = Math.Max(60.0, Math.Min(315360000.0, current + deltaSeconds));
+            if (Math.Abs(newLength - current) < 0.5) return;
+            ApplyPredictionLength(newLength);
         }
 
         // ─── Integration parameters ─────────────────────────────────────────────
@@ -310,6 +353,24 @@ namespace Galilego.Gameplay
                 evaluator?.MarkAsDirty();
             }
             GUILayout.EndHorizontal();
+
+            int recommendedSteps = evaluator != null ? evaluator.GetRecommendedMaxSteps() : 0;
+            int currentSteps = MaxSteps[maxStepsIndex];
+            if (recommendedSteps > 0 && currentSteps < recommendedSteps)
+            {
+                string needed = $"{recommendedSteps}";
+                for (int i = 0; i < MaxSteps.Length; i++)
+                {
+                    if (MaxSteps[i] >= recommendedSteps)
+                    {
+                        needed = MaxSteps[i].ToString();
+                        break;
+                    }
+                }
+                GUILayout.BeginHorizontal();
+                GUILayout.Label($"⚠ Increase Max steps to {needed}+", styleLabelYellow);
+                GUILayout.EndHorizontal();
+            }
 
             GUILayout.FlexibleSpace();
 
@@ -775,11 +836,17 @@ namespace Galilego.Gameplay
             {
                 GUILayout.BeginHorizontal();
                 GUILayout.Label("Orbit history:", styleLabel, GUILayout.Width(90));
-                float newHist = GUILayout.HorizontalSlider(universeManager.MoonOrbitHistoryFraction, 0f, 1f);
-                if (!Mathf.Approximately(newHist, universeManager.MoonOrbitHistoryFraction))
-                    universeManager.MoonOrbitHistoryFraction = newHist;
-                string histLabel = universeManager.MoonOrbitHistoryFraction < 0.01f ? "OFF" : $"{universeManager.MoonOrbitHistoryFraction * 100f:F0}%";
-                GUILayout.Label(histLabel, universeManager.MoonOrbitHistoryFraction < 0.01f ? styleLabelDim : styleLabelGreen, GUILayout.Width(40));
+                GUILayout.Label("◀", styleLabelDim, GUILayout.Width(14));
+                moonHistoryScrubValue = GUILayout.HorizontalSlider(moonHistoryScrubValue, -1f, 1f);
+                GUILayout.Label("▶", styleLabelDim, GUILayout.Width(14));
+                float days = universeManager.MoonOrbitHistoryDays;
+                float sec = days * 86400f;
+                int dd = (int)(sec / 86400); sec -= dd * 86400;
+                int hh = (int)(sec / 3600);  sec -= hh * 3600;
+                int mm = (int)(sec / 60);    sec -= mm * 60;
+                int ss = (int)sec;
+                string label = dd > 0 ? $"{dd}d {hh:D2}h" : hh > 0 ? $"{hh}h {mm:D2}m" : $"{mm}m {ss:D2}s";
+                GUILayout.Label(label, styleLabelGreen, GUILayout.Width(70));
                 GUILayout.EndHorizontal();
             }
 
@@ -820,16 +887,17 @@ namespace Galilego.Gameplay
             if (double.IsInfinity(s) || double.IsNaN(s)) return "∞";
             if (s < 0) s = 0;
             const double day = 86400;
-            const double year = 31557600; // 365.25 days
+            const double year = 31557600;
             int y = (int)(s / year);
             int d = (int)((s % year) / day);
             int h = (int)((s % day) / 3600);
             int m = (int)((s % 3600) / 60);
             int sec = (int)(s % 60);
-            if (y > 0) return $"{y}y {d}d";
-            if (d > 0) return $"{d}d {h:00}h";
-            if (h > 0) return $"{h}h {m:00}m";
-            if (m > 0) return $"{m}m {sec:00}s";
+
+            if (y > 0) return $"{y}y {d}d {h}h {m}m {sec}s";
+            if (d > 0) return $"{d}d {h}h {m}m {sec}s";
+            if (h > 0) return $"{h}h {m}m {sec}s";
+            if (m > 0) return $"{m}m {sec}s";
             return $"{sec}s";
         }
 

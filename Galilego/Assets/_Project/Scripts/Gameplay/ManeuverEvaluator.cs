@@ -35,6 +35,7 @@ namespace Galilego.Gameplay
 
         private List<Vector3d> fullTrajectoryPoints = new List<Vector3d>();
         private List<double> fullTrajectoryTimes = new List<double>();
+        private List<bool> fullTrajectoryIsDashed = new List<bool>();
 
         private Vector3[] backBufferPoints;
         private double[] backBufferTimes;
@@ -55,13 +56,30 @@ namespace Galilego.Gameplay
         private JobHandle trajectoryJobHandle;
         private bool isJobRunning = false;
 
+        // Cache to skip recalculation when inputs haven't changed
+        private double3? cachedStartPos;
+        private double3? cachedStartVel;
+        private double? cachedStartTime;
+        private double? cachedPredictionLength;
+        private List<ManeuverNodeData> cachedNodeData = new List<ManeuverNodeData>();
+
+        // Segment-level cache: per-boundary states for partial recalculation
+        private List<SegmentBoundaryState> cachedBoundaries = new List<SegmentBoundaryState>();
+        private bool hasPartialCacheHit = false;
+        private int partialStartSegment = 0;
+        private double3 cachedPartialStartPos;
+        private double3 cachedPartialStartVel;
+        private double cachedPartialStartTime;
+
         private NativeArray<MoonOrbitData> nativeMoonOrbits;
         private NativeArray<ManeuverNodeData> nativeNodeData;
         private NativeArray<double> nativeEphemerisTimes;
         private NativeArray<BodyState> nativeEphemerisResults;
         private NativeArray<double3> nativeEphemerisVelocities;
         private NativeArray<TrajectoryPoint> nativeTrajectoryOutput;
+        private NativeArray<SegmentBoundaryState> nativeBoundaries;
         private NativeReference<int> nativePointCount;
+        private NativeReference<int> nativeBoundaryCount;
         private NativeReference<int> nativeCalcStatus;
 
         private void Start()
@@ -163,6 +181,58 @@ namespace Galilego.Gameplay
             dirtyTimer = 0f;
         }
 
+        private bool MatchesCachedInput()
+        {
+            if (!cachedStartPos.HasValue || !cachedStartVel.HasValue || !cachedStartTime.HasValue)
+                return false;
+
+            double3 pos = JobTypeConversion.ToDouble3(universeManager.ShipBody.Position);
+            double3 vel = JobTypeConversion.ToDouble3(universeManager.ShipBody.Velocity);
+            double time = universeManager.SimulationTimeSeconds;
+
+            if (math.distance(pos, cachedStartPos.Value) > 0.001) return false;
+            if (math.distance(vel, cachedStartVel.Value) > 0.001) return false;
+            if (math.abs(time - cachedStartTime.Value) > 0.001) return false;
+
+            double requestedPrediction = flightPlan.PredictionLengthSeconds > 0d
+                ? flightPlan.PredictionLengthSeconds
+                : defaultPredictionLengthSeconds;
+            if (cachedPredictionLength.HasValue &&
+                math.abs(requestedPrediction - cachedPredictionLength.Value) > 0.5)
+                return false;
+
+            int nodeCount = flightPlan.Nodes.Count;
+            if (nodeCount != cachedNodeData.Count) return false;
+
+            for (int i = 0; i < nodeCount; i++)
+            {
+                var cur = JobTypeConversion.ToNodeData(flightPlan.Nodes[i]);
+                var cached = cachedNodeData[i];
+                if (math.abs(cur.StartTime - cached.StartTime) > 0.01) return false;
+                if (math.abs(cur.DvPrograde - cached.DvPrograde) > 0.001) return false;
+                if (math.abs(cur.DvNormal - cached.DvNormal) > 0.001) return false;
+                if (math.abs(cur.DvRadial - cached.DvRadial) > 0.001) return false;
+                if (cur.IsInstant != cached.IsInstant) return false;
+                if (cur.HasEngine != cached.HasEngine) return false;
+            }
+
+            return true;
+        }
+
+        private void UpdateCache()
+        {
+            cachedStartPos = JobTypeConversion.ToDouble3(universeManager.ShipBody.Position);
+            cachedStartVel = JobTypeConversion.ToDouble3(universeManager.ShipBody.Velocity);
+            cachedStartTime = universeManager.SimulationTimeSeconds;
+            cachedPredictionLength = flightPlan.PredictionLengthSeconds > 0d
+                ? flightPlan.PredictionLengthSeconds
+                : defaultPredictionLengthSeconds;
+
+            cachedNodeData.Clear();
+            for (int i = 0; i < flightPlan.Nodes.Count; i++)
+                cachedNodeData.Add(JobTypeConversion.ToNodeData(flightPlan.Nodes[i]));
+        }
+
         public void RequestRecalculation()
         {
             if (Time.realtimeSinceStartup < 1f)
@@ -180,33 +250,157 @@ namespace Galilego.Gameplay
             if (universeManager == null || universeManager.ShipBody == null)
                 return;
 
+            // Skip recalculation if inputs haven't changed meaningfully
+            if (MatchesCachedInput())
+            {
+                isDirty = false;
+                return;
+            }
+
+            // Try partial recalc: only recompute affected suffix of trajectory
+            hasPartialCacheHit = false;
+            TryFindPartialRestartPoint();
+
             CompleteAndDisposeJobs();
             ClearLines();
 
-            fullTrajectoryPoints.Clear();
-            fullTrajectoryTimes.Clear();
+            if (hasPartialCacheHit)
+            {
+                TrimTrajectoryToBoundary();
+            }
+            else
+            {
+                fullTrajectoryPoints.Clear();
+                fullTrajectoryTimes.Clear();
+                fullTrajectoryIsDashed.Clear();
+            }
 
             lockedReferenceFrame = universeManager.ActiveReferenceFrame;
 
             ScheduleJobs();
+
+            if (forceSynchronousCalculation)
+            {
+                CompleteJobAndSwap();
+            }
+        }
+
+        private void TryFindPartialRestartPoint()
+        {
+            hasPartialCacheHit = false;
+
+            if (cachedBoundaries.Count == 0) return;
+
+            // Ship must be at the same start state
+            double3 pos = JobTypeConversion.ToDouble3(universeManager.ShipBody.Position);
+            double3 vel = JobTypeConversion.ToDouble3(universeManager.ShipBody.Velocity);
+            if (math.distance(pos, cachedBoundaries[0].Position) > 0.001) return;
+            if (math.distance(vel, cachedBoundaries[0].Velocity) > 0.001) return;
+
+            double requestedPrediction = flightPlan.PredictionLengthSeconds > 0d
+                ? flightPlan.PredictionLengthSeconds
+                : defaultPredictionLengthSeconds;
+            if (cachedPredictionLength.HasValue &&
+                math.abs(requestedPrediction - cachedPredictionLength.Value) > 0.5) return;
+
+            int nodeCount = flightPlan.Nodes.Count;
+            if (nodeCount != cachedNodeData.Count) return;
+
+            // Find first changed node (by idx, sorted by time)
+            int changedIdx = -1;
+            for (int i = 0; i < nodeCount; i++)
+            {
+                var cur = JobTypeConversion.ToNodeData(flightPlan.Nodes[i]);
+                var cached = cachedNodeData[i];
+                if (math.abs(cur.StartTime - cached.StartTime) > 0.01)
+                {
+                    // Time changed — sort order might have changed, can't partial restart
+                    return;
+                }
+                if (math.abs(cur.DvPrograde - cached.DvPrograde) > 0.001 ||
+                    math.abs(cur.DvNormal - cached.DvNormal) > 0.001 ||
+                    math.abs(cur.DvRadial - cached.DvRadial) > 0.001 ||
+                    cur.IsInstant != cached.IsInstant ||
+                    cur.HasEngine != cached.HasEngine)
+                {
+                    changedIdx = i;
+                    break;
+                }
+            }
+
+            if (changedIdx <= 0) return;
+
+            // We have a cache hit — start from cachedBoundaries[changedIdx]
+            // which is state AFTER node[changedIdx-1]'s Δv
+            int boundaryIdx = Math.Min(changedIdx, cachedBoundaries.Count - 1);
+            var boundary = cachedBoundaries[boundaryIdx];
+            hasPartialCacheHit = true;
+            partialStartSegment = changedIdx;
+            cachedPartialStartPos = boundary.Position;
+            cachedPartialStartVel = boundary.Velocity;
+            cachedPartialStartTime = boundary.Time;
+        }
+
+        private void TrimTrajectoryToBoundary()
+        {
+            if (fullTrajectoryPoints.Count == 0) return;
+
+            double boundaryTime = cachedPartialStartTime;
+            int trimIdx = -1;
+            for (int i = 0; i < fullTrajectoryTimes.Count; i++)
+            {
+                if (fullTrajectoryTimes[i] >= boundaryTime - 0.5 && fullTrajectoryTimes[i] <= boundaryTime + 0.5)
+                {
+                    trimIdx = i;
+                    break;
+                }
+            }
+
+            if (trimIdx >= 0 && trimIdx + 1 < fullTrajectoryPoints.Count)
+            {
+                int keepCount = trimIdx;
+                fullTrajectoryPoints.RemoveRange(keepCount, fullTrajectoryPoints.Count - keepCount);
+                fullTrajectoryTimes.RemoveRange(keepCount, fullTrajectoryTimes.Count - keepCount);
+                fullTrajectoryIsDashed.RemoveRange(keepCount, fullTrajectoryIsDashed.Count - keepCount);
+            }
         }
 
         private void ScheduleJobs()
         {
             flightPlan.Nodes.Sort((a, b) => a.StartTime.CompareTo(b.StartTime));
 
-            double3 startPos = JobTypeConversion.ToDouble3(universeManager.ShipBody.Position);
-            double3 startVel = JobTypeConversion.ToDouble3(universeManager.ShipBody.Velocity);
-            double startTime = universeManager.SimulationTimeSeconds;
-
+            // Always compute endTime from the original ship start time
+            double baseStartTime = universeManager.SimulationTimeSeconds;
             double requestedPrediction = flightPlan.PredictionLengthSeconds > 0d
                 ? flightPlan.PredictionLengthSeconds
                 : defaultPredictionLengthSeconds;
             double effectivePrediction = Math.Min(requestedPrediction, maxPredictionLengthSeconds);
-            double endTime = startTime + effectivePrediction;
+            double endTime = baseStartTime + effectivePrediction;
 
+            // Determine start state — either fresh or from cache
+            double3 startPos;
+            double3 startVel;
+            double startTime;
             int nodeCount = flightPlan.Nodes.Count;
+            int jobNodeOffset = 0;
 
+            if (hasPartialCacheHit)
+            {
+                startPos = cachedPartialStartPos;
+                startVel = cachedPartialStartVel;
+                startTime = cachedPartialStartTime;
+                jobNodeOffset = partialStartSegment;
+            }
+            else
+            {
+                startPos = JobTypeConversion.ToDouble3(universeManager.ShipBody.Position);
+                startVel = JobTypeConversion.ToDouble3(universeManager.ShipBody.Velocity);
+                startTime = baseStartTime;
+            }
+
+            double remainingPrediction = Math.Max(0.0, endTime - startTime);
+
+            int jobNodeCount = nodeCount - jobNodeOffset;
             int adjustedMaxPoints = Math.Max(maxTrajectoryPoints,
                 (int)(effectivePrediction / 600.0) + 2);
             double adaptiveStep = effectivePrediction / Math.Max(1, (int)(adjustedMaxPoints * 0.9));
@@ -216,10 +410,10 @@ namespace Galilego.Gameplay
                 ? flightPlan.MaxStepsPerSegment
                 : maxSubstepsPerSegment;
 
-            int nodeDataAlloc = Math.Max(1, nodeCount);
+            int nodeDataAlloc = Math.Max(1, jobNodeCount);
             nativeNodeData = new NativeArray<ManeuverNodeData>(nodeDataAlloc, Allocator.Persistent);
-            for (int i = 0; i < nodeCount; i++)
-                nativeNodeData[i] = JobTypeConversion.ToNodeData(flightPlan.Nodes[i]);
+            for (int i = 0; i < jobNodeCount; i++)
+                nativeNodeData[i] = JobTypeConversion.ToNodeData(flightPlan.Nodes[jobNodeOffset + i]);
 
             double3 jupiterPos = JobTypeConversion.ToDouble3(universeManager.JupiterPosition);
             double jupiterSGP = universeManager.JupiterSGP;
@@ -230,12 +424,12 @@ namespace Galilego.Gameplay
             if (moonCount > 0)
             {
                 var tempOrbits = new MoonOrbitData[moonCount];
-                universeManager.FillMoonOrbitData(tempOrbits, 0, moonCount, startTime);
+                universeManager.FillMoonOrbitData(tempOrbits, 0, moonCount, baseStartTime);
                 for (int i = 0; i < moonCount; i++)
                     nativeMoonOrbits[i] = tempOrbits[i];
             }
 
-            double predictionSpan = endTime - startTime;
+            double predictionSpan = endTime - baseStartTime;
             double ephemerisStep = Math.Min(5.0 * 3600.0,
                 Math.Max(60.0, predictionSpan / 20000.0));
             int ephemerisSampleCount = Math.Max(2, (int)(predictionSpan / ephemerisStep) + 1);
@@ -243,7 +437,7 @@ namespace Galilego.Gameplay
 
             nativeEphemerisTimes = new NativeArray<double>(ephemerisSampleCount, Allocator.Persistent);
             for (int i = 0; i < ephemerisSampleCount; i++)
-                nativeEphemerisTimes[i] = startTime + i * ephemerisStep;
+                nativeEphemerisTimes[i] = baseStartTime + i * ephemerisStep;
             nativeEphemerisTimes[ephemerisSampleCount - 1] = endTime;
 
             nativeEphemerisResults = new NativeArray<BodyState>(
@@ -254,6 +448,9 @@ namespace Galilego.Gameplay
             nativeTrajectoryOutput = new NativeArray<TrajectoryPoint>(
                 adjustedMaxPoints, Allocator.Persistent);
             nativePointCount = new NativeReference<int>(0, Allocator.Persistent);
+            nativeBoundaries = new NativeArray<SegmentBoundaryState>(
+                nodeCount + 2, Allocator.Persistent);
+            nativeBoundaryCount = new NativeReference<int>(0, Allocator.Persistent);
             nativeCalcStatus = new NativeReference<int>(0, Allocator.Persistent);
 
             if (moonCount > 0)
@@ -306,17 +503,22 @@ namespace Galilego.Gameplay
                     ((long)(effectivePrediction / Math.Max(1e-6, majorStep)) + 1) * maxSubsteps + 100000,
                     int.MaxValue / 2),
 
-                PredictionLengthSeconds = requestedPrediction,
+                PredictionLengthSeconds = remainingPrediction > 0.0 ? remainingPrediction : requestedPrediction,
                 MaxPredictionLengthSeconds = maxPredictionLengthSeconds,
 
                 OutputPoints = nativeTrajectoryOutput,
                 PointCount = nativePointCount,
-                CalculationStatus = nativeCalcStatus
+                CalculationStatus = nativeCalcStatus,
+
+                SegmentBoundaries = nativeBoundaries,
+                SegmentBoundaryCount = nativeBoundaryCount
             };
 
             trajectoryJobHandle = trajectoryJob.Schedule(ephemerisJobHandle);
             JobHandle.ScheduleBatchedJobs();
             isJobRunning = true;
+
+            UpdateCache();
         }
 
         private void CompleteJobAndSwap()
@@ -325,41 +527,91 @@ namespace Galilego.Gameplay
 
             trajectoryJobHandle.Complete();
 
+            // Read boundary states from job, mapping to global indices
+            int boundaryCount = nativeBoundaryCount.IsCreated ? nativeBoundaryCount.Value : 0;
+            if (nativeBoundaries.IsCreated)
+            {
+                if (hasPartialCacheHit)
+                {
+                    // Replace suffix: keep 0..partialStartSegment-1, replace from partialStartSegment
+                    int replaceIdx = partialStartSegment;
+                    for (int i = 0; i < boundaryCount && i < nativeBoundaries.Length; i++)
+                    {
+                        int globalIdx = replaceIdx + i;
+                        while (cachedBoundaries.Count <= globalIdx)
+                            cachedBoundaries.Add(default);
+                        cachedBoundaries[globalIdx] = nativeBoundaries[i];
+                    }
+                    // Trim stale entries beyond new boundary count
+                    int totalGlobal = replaceIdx + boundaryCount;
+                    if (cachedBoundaries.Count > totalGlobal)
+                        cachedBoundaries.RemoveRange(totalGlobal, cachedBoundaries.Count - totalGlobal);
+                }
+                else
+                {
+                    // Full recalc — replace entirely
+                    cachedBoundaries.Clear();
+                    for (int i = 0; i < boundaryCount && i < nativeBoundaries.Length; i++)
+                        cachedBoundaries.Add(nativeBoundaries[i]);
+                }
+            }
+
+            // In partial recalc, fill backBuffer with cached prefix + new suffix
             int count = nativePointCount.Value;
             int status = nativeCalcStatus.Value;
 
+            int existingPointCount = fullTrajectoryPoints.Count;
+            int totalPoints = existingPointCount + count;
+
             if (count > 0 && status == 1)
             {
-                InitializeBackBuffer(count);
+                InitializeBackBuffer(totalPoints);
 
                 Vector3d firstFramePos = Vector3d.Zero;
                 Vector3d firstFrameVel = Vector3d.Zero;
-                if (count > 0)
+
+                // Fill cached prefix (points before the changed boundary)
+                int bufIdx = 0;
+                for (int i = 0; i < existingPointCount && bufIdx < backBufferPoints.Length; i++)
                 {
-                    double firstTime = nativeTrajectoryOutput[0].Time;
-                    TryUpdateFrameState(ref firstFramePos, ref firstFrameVel, firstTime);
+                    double ptTime = fullTrajectoryTimes[i];
+                    Vector3d absPos = fullTrajectoryPoints[i];
+                    TryUpdateFrameState(ref firstFramePos, ref firstFrameVel, ptTime);
+                    Vector3d relPos = absPos - firstFramePos;
+                    backBufferPoints[bufIdx] = universeManager.ToUnityOffset(relPos);
+                    backBufferTimes[bufIdx] = ptTime;
+                    backBufferIsDashed[bufIdx] = i < fullTrajectoryIsDashed.Count && fullTrajectoryIsDashed[i];
+                    bufIdx++;
                 }
 
-                for (int i = 0; i < count && i < backBufferPoints.Length; i++)
+                // Fill new suffix (from job output), skip first point if it duplicates last cached point
+                int newStartIdx = 0;
+                if (existingPointCount > 0 && count > 0)
+                {
+                    double lastCachedTime = fullTrajectoryTimes[existingPointCount - 1];
+                    double firstNewTime = nativeTrajectoryOutput[0].Time;
+                    if (Math.Abs(lastCachedTime - firstNewTime) < 0.5)
+                        newStartIdx = 1;
+                }
+
+                for (int i = newStartIdx; i < count && bufIdx < backBufferPoints.Length; i++)
                 {
                     var pt = nativeTrajectoryOutput[i];
                     Vector3d absPos = JobTypeConversion.ToVector3d(pt.Position);
-
-                    Vector3d framePos = firstFramePos;
-                    Vector3d frameVel = firstFrameVel;
-                    TryUpdateFrameState(ref framePos, ref frameVel, pt.Time);
-
-                    Vector3d relPos = absPos - framePos;
-                    backBufferPoints[i] = universeManager.ToUnityOffset(relPos);
-                    backBufferTimes[i] = pt.Time;
-                    backBufferIsDashed[i] = pt.IsDashed != 0;
+                    TryUpdateFrameState(ref firstFramePos, ref firstFrameVel, pt.Time);
+                    Vector3d relPos = absPos - firstFramePos;
+                    backBufferPoints[bufIdx] = universeManager.ToUnityOffset(relPos);
+                    backBufferTimes[bufIdx] = pt.Time;
+                    backBufferIsDashed[bufIdx] = pt.IsDashed != 0;
 
                     fullTrajectoryPoints.Add(absPos);
                     fullTrajectoryTimes.Add(pt.Time);
+                    fullTrajectoryIsDashed.Add(pt.IsDashed != 0);
+                    bufIdx++;
                 }
-                backBufferCount = count;
+                backBufferCount = bufIdx;
 
-                CompleteBackBuffer(count);
+                CompleteBackBuffer(backBufferCount);
             }
 
             DisposeJobResources();
@@ -375,7 +627,9 @@ namespace Galilego.Gameplay
             if (nativeEphemerisResults.IsCreated) nativeEphemerisResults.Dispose();
             if (nativeEphemerisVelocities.IsCreated) nativeEphemerisVelocities.Dispose();
             if (nativeTrajectoryOutput.IsCreated) nativeTrajectoryOutput.Dispose();
+            if (nativeBoundaries.IsCreated) nativeBoundaries.Dispose();
             if (nativePointCount.IsCreated) nativePointCount.Dispose();
+            if (nativeBoundaryCount.IsCreated) nativeBoundaryCount.Dispose();
             if (nativeCalcStatus.IsCreated) nativeCalcStatus.Dispose();
         }
 
@@ -627,6 +881,23 @@ namespace Galilego.Gameplay
         }
 
         public FlightPlan GetFlightPlan() => flightPlan;
+
+        public int GetRecommendedMaxSteps()
+        {
+            if (universeManager == null || flightPlan == null) return 0;
+            double requestedPrediction = flightPlan.PredictionLengthSeconds > 0d
+                ? flightPlan.PredictionLengthSeconds
+                : defaultPredictionLengthSeconds;
+            double effectivePrediction = Math.Min(requestedPrediction, maxPredictionLengthSeconds);
+            int adjustedMaxPoints = Math.Max(maxTrajectoryPoints,
+                (int)(effectivePrediction / 600.0) + 2);
+            double adaptiveStep = effectivePrediction / Math.Max(1, (int)(adjustedMaxPoints * 0.9));
+            double majorStep = Math.Min(
+                Math.Max(1e-6d, Math.Max(predictionStepSeconds, adaptiveStep)),
+                600.0);
+            double substepLimit = ResolveSubstepLimitSeconds(majorStep);
+            return (int)Math.Ceiling(majorStep / Math.Max(1e-9, substepLimit));
+        }
 
         private static int ResolveTrajectoryLayer()
         {

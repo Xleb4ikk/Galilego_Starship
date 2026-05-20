@@ -35,10 +35,14 @@ namespace Galilego.Gameplay
         public NativeReference<int> PointCount;
         public NativeReference<int> CalculationStatus;
 
+        [WriteOnly] public NativeArray<SegmentBoundaryState> SegmentBoundaries;
+        public NativeReference<int> SegmentBoundaryCount;
+
         public void Execute()
         {
             int totalPoints = 0;
-            int segmentIterLimit = 0;
+            int ephemIdx = 0;
+            int bCount = 0;
 
             double requestedPrediction = PredictionLengthSeconds > 0.0
                 ? PredictionLengthSeconds
@@ -59,6 +63,17 @@ namespace Galilego.Gameplay
             double3 currentPos = StartPos;
             double3 currentVel = StartVel;
             double currentTime = StartTime;
+
+            if (SegmentBoundaries.IsCreated && SegmentBoundaries.Length > 0)
+            {
+                SegmentBoundaries[0] = new SegmentBoundaryState
+                {
+                    Position = currentPos,
+                    Velocity = currentVel,
+                    Time = currentTime
+                };
+                bCount = 1;
+            }
 
             int nodeCount = Nodes.Length;
 
@@ -90,6 +105,16 @@ namespace Galilego.Gameplay
                         if (currentNode.HasEngine != 0 && currentNode.IsInstant == 0)
                         {
                             currentTime = currentNode.StartTime + currentNode.Duration;
+                        }
+
+                        if (SegmentBoundaries.IsCreated && bCount < SegmentBoundaries.Length)
+                        {
+                            SegmentBoundaries[bCount++] = new SegmentBoundaryState
+                            {
+                                Position = currentPos,
+                                Velocity = currentVel,
+                                Time = currentTime
+                            };
                         }
                     }
                     continue;
@@ -141,7 +166,7 @@ namespace Galilego.Gameplay
                             break;
                         }
 
-                        var res = RK4Step(currentPos, currentVel, currentTime, internalDt);
+                        var res = RK4Step(currentPos, currentVel, currentTime, internalDt, ref ephemIdx);
                         currentPos = res.Position;
                         currentVel = res.Velocity;
                         currentTime += internalDt;
@@ -178,6 +203,16 @@ namespace Galilego.Gameplay
                     {
                         currentTime = currentNode.StartTime + currentNode.Duration;
                     }
+
+                    if (SegmentBoundaries.IsCreated && bCount < SegmentBoundaries.Length)
+                    {
+                        SegmentBoundaries[bCount++] = new SegmentBoundaryState
+                        {
+                            Position = currentPos,
+                            Velocity = currentVel,
+                            Time = currentTime
+                        };
+                    }
                 }
 
                 if (totalPoints >= MaxPoints) break;
@@ -185,6 +220,8 @@ namespace Galilego.Gameplay
 
             PointCount.Value = totalPoints;
             CalculationStatus.Value = 1;
+            if (SegmentBoundaryCount.IsCreated)
+                SegmentBoundaryCount.Value = bCount;
         }
 
         private int AddPoint(NativeArray<TrajectoryPoint> points, int index, int max, double3 pos, double time, int isDashed)
@@ -202,22 +239,22 @@ namespace Galilego.Gameplay
             return index;
         }
 
-        private IntegrationResult RK4Step(double3 pos, double3 vel, double time, double dt)
+        private IntegrationResult RK4Step(double3 pos, double3 vel, double time, double dt, ref int ephemIdx)
         {
             double halfDt = dt * 0.5;
             double sixthDt = dt / 6.0;
 
             double3 k1Pos = vel;
-            double3 k1Vel = EvaluateAcceleration(pos, time);
+            double3 k1Vel = EvaluateAcceleration(pos, time, ref ephemIdx);
 
             double3 k2Pos = vel + k1Vel * halfDt;
-            double3 k2Vel = EvaluateAcceleration(pos + k1Pos * halfDt, time + halfDt);
+            double3 k2Vel = EvaluateAcceleration(pos + k1Pos * halfDt, time + halfDt, ref ephemIdx);
 
             double3 k3Pos = vel + k2Vel * halfDt;
-            double3 k3Vel = EvaluateAcceleration(pos + k2Pos * halfDt, time + halfDt);
+            double3 k3Vel = EvaluateAcceleration(pos + k2Pos * halfDt, time + halfDt, ref ephemIdx);
 
             double3 k4Pos = vel + k3Vel * dt;
-            double3 k4Vel = EvaluateAcceleration(pos + k3Pos * dt, time + dt);
+            double3 k4Vel = EvaluateAcceleration(pos + k3Pos * dt, time + dt, ref ephemIdx);
 
             double3 newPos = pos + ((k1Pos + 2.0 * k2Pos + 2.0 * k3Pos + k4Pos) * sixthDt);
             double3 newVel = vel + ((k1Vel + 2.0 * k2Vel + 2.0 * k3Vel + k4Vel) * sixthDt);
@@ -225,7 +262,7 @@ namespace Galilego.Gameplay
             return new IntegrationResult { Position = newPos, Velocity = newVel };
         }
 
-        private double3 EvaluateAcceleration(double3 pos, double time)
+        private double3 EvaluateAcceleration(double3 pos, double time, ref int ephemIdx)
         {
             double3 total = double3.zero;
 
@@ -236,8 +273,17 @@ namespace Galilego.Gameplay
 
             if (MoonEphemeris.Length > 0 && EphemerisTimes.Length > 0)
             {
-                int idx = FindEphemerisIndex(time);
-                if (idx >= 0 && idx < EphemerisTimes.Length - 1)
+                int timesLen = EphemerisTimes.Length;
+                if (ephemIdx >= timesLen) ephemIdx = timesLen - 1;
+                if (ephemIdx < 0) ephemIdx = 0;
+
+                while (ephemIdx < timesLen - 2 && EphemerisTimes[ephemIdx + 1] < time)
+                    ephemIdx++;
+                while (ephemIdx > 0 && EphemerisTimes[ephemIdx] > time)
+                    ephemIdx--;
+
+                int idx = ephemIdx;
+                if (idx >= 0 && idx < timesLen - 1)
                 {
                     double t0 = EphemerisTimes[idx];
                     double t1 = EphemerisTimes[idx + 1];
@@ -257,7 +303,7 @@ namespace Galilego.Gameplay
                             MoonEphemeris[b0 + m].StandardGravitationalParameter);
                     }
                 }
-                else if (idx >= 0 && idx < EphemerisTimes.Length)
+                else if (idx >= 0 && idx < timesLen)
                 {
                     int b = idx * MoonCount;
                     for (int m = 0; m < MoonCount; m++)
@@ -269,26 +315,6 @@ namespace Galilego.Gameplay
             }
 
             return total;
-        }
-
-        private int FindEphemerisIndex(double time)
-        {
-            if (EphemerisTimes.Length == 0) return -1;
-            if (time <= EphemerisTimes[0]) return 0;
-            if (time >= EphemerisTimes[EphemerisTimes.Length - 1])
-                return EphemerisTimes.Length - 1;
-
-            int lo = 0;
-            int hi = EphemerisTimes.Length - 1;
-            while (lo < hi - 1)
-            {
-                int mid = (lo + hi) / 2;
-                if (EphemerisTimes[mid] <= time)
-                    lo = mid;
-                else
-                    hi = mid;
-            }
-            return lo;
         }
 
         private static double3 BodyGravity(double3 shipPos, double3 bodyPos, double sgp)
@@ -329,5 +355,12 @@ namespace Galilego.Gameplay
             public double3 Position;
             public double3 Velocity;
         }
+    }
+
+    public struct SegmentBoundaryState
+    {
+        public double3 Position;
+        public double3 Velocity;
+        public double Time;
     }
 }

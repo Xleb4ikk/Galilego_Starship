@@ -116,7 +116,7 @@ namespace Galilego.Physics
         [SerializeField] private float moonOrbitScreenWidth = 3f;
         [SerializeField] private float moonOrbitTailAlpha = 1f;
         [SerializeField] private float moonOrbitAheadAlpha = 0.08f;
-        [SerializeField] [Range(0f, 1f)] private float moonOrbitHistoryFraction = 1f;
+        [SerializeField] [Range(1f, 365f)] private float moonOrbitHistoryDays = 30f;
         [SerializeField] private Color shipTrajectoryColor = new Color(0.25f, 0.95f, 1f, 0.95f);
         [SerializeField] private Color moonOrbitColor = new Color(0.65f, 0.85f, 1f, 0.4f);
 
@@ -201,10 +201,10 @@ namespace Galilego.Physics
 
         public double PreviewAbsoluteTime => TrajectoryPreviewEndTime;
 
-        public float MoonOrbitHistoryFraction
+        public float MoonOrbitHistoryDays
         {
-            get => moonOrbitHistoryFraction;
-            set => moonOrbitHistoryFraction = Mathf.Clamp01(value);
+            get => moonOrbitHistoryDays;
+            set => moonOrbitHistoryDays = Mathf.Clamp(value, 0.0007f, 365f);
         }
 
         private void Awake()
@@ -839,7 +839,7 @@ namespace Galilego.Physics
 
             moonOrbitTailAlpha = Mathf.Clamp01(moonOrbitTailAlpha);
             moonOrbitAheadAlpha = Mathf.Clamp01(moonOrbitAheadAlpha);
-            moonOrbitHistoryFraction = Mathf.Clamp01(moonOrbitHistoryFraction);
+            moonOrbitHistoryDays = Mathf.Clamp(moonOrbitHistoryDays, 0.0007f, 365f);
 
             telemetryOverlayMinSize.x = Mathf.Max(240f, telemetryOverlayMinSize.x);
             telemetryOverlayMinSize.y = Mathf.Max(160f, telemetryOverlayMinSize.y);
@@ -3199,15 +3199,21 @@ namespace Galilego.Physics
                 ConfigureMoonOrbitRenderer(orbitRenderer, false, moonColor);
 
                 double orbitalPeriod = ResolveOrbitPeriodSeconds(rail);
-                int currentSampleIndex = isFocusedOrbit ? ResolveCurrentOrbitSampleIndex(sampleCount, moonOrbitHistoryFraction) : -1;
+                double historySeconds = moonOrbitHistoryDays * 86400d;
+                double orbitCount = orbitalPeriod > 0d ? historySeconds / orbitalPeriod : 1d;
+                int effectiveSamples = orbitalPeriod > 0d
+                    ? Math.Max(16, (int)Math.Round(sampleCount * historySeconds / orbitalPeriod))
+                    : sampleCount;
+                int lastIndex = effectiveSamples - 1;
 
-                                orbitRenderer.positionCount = sampleCount;
-                for (int sampleIndex = 0; sampleIndex < sampleCount; sampleIndex++)
+                orbitRenderer.colorGradient = BuildMoonOrbitFadeGradient(moonColor, 1f, (float)orbitCount);
+                orbitRenderer.positionCount = effectiveSamples;
+                for (int sampleIndex = 0; sampleIndex < effectiveSamples; sampleIndex++)
                 {
-                    double orbitFraction = sampleCount <= 1 ? 0d : (double)sampleIndex / (sampleCount - 1);
-                    double sampleTime = sampleIndex == currentSampleIndex
+                    double t = effectiveSamples <= 1 ? 0d : (double)sampleIndex / lastIndex;
+                    double sampleTime = sampleIndex == lastIndex
                         ? orbitTime
-                        : ResolveFadedOrbitSampleTime(orbitalPeriod, orbitFraction, orbitTime, moonOrbitHistoryFraction);
+                        : orbitTime - historySeconds + t * historySeconds;
                     EvaluateMoonState(rail, sampleTime, out Vector3d moonPosition, out _);
 
                     orbitRenderer.SetPosition(sampleIndex, ToUnityOffset(moonPosition - currentFramePosition));
@@ -3258,12 +3264,19 @@ namespace Galilego.Physics
 
             ConfigureMoonOrbitRenderer(jupiterOrbitRenderer, false, ResolveMoonOrbitColor(-1));
             double orbitalPeriod = ResolveOrbitPeriodSeconds(activeRail);
+            double historySeconds = moonOrbitHistoryDays * 86400d;
+            double orbitCount = orbitalPeriod > 0d ? historySeconds / orbitalPeriod : 1d;
+            int effectiveSamples = orbitalPeriod > 0d
+                ? Math.Max(16, (int)Math.Round(sampleCount * historySeconds / orbitalPeriod))
+                : sampleCount;
+            int lastIndex = effectiveSamples - 1;
 
-            jupiterOrbitRenderer.positionCount = sampleCount;
-            for (int sampleIndex = 0; sampleIndex < sampleCount; sampleIndex++)
+            jupiterOrbitRenderer.colorGradient = BuildMoonOrbitFadeGradient(ResolveMoonOrbitColor(-1), 1f, (float)orbitCount);
+            jupiterOrbitRenderer.positionCount = effectiveSamples;
+            for (int sampleIndex = 0; sampleIndex < effectiveSamples; sampleIndex++)
             {
-                double orbitFraction = sampleCount <= 1 ? 0d : (double)sampleIndex / (sampleCount - 1);
-                double sampleTime = ResolveFadedOrbitSampleTime(orbitalPeriod, orbitFraction, orbitTime, moonOrbitHistoryFraction);
+                double t = effectiveSamples <= 1 ? 0d : (double)sampleIndex / lastIndex;
+                double sampleTime = orbitTime - historySeconds + t * historySeconds;
 
                 jupiterOrbitRenderer.SetPosition(sampleIndex, ToUnityOffset(jupiterRealPosition - currentFramePosition));
             }
@@ -3460,70 +3473,32 @@ namespace Galilego.Physics
             }
         }
 
-                private double ResolveFadedOrbitSampleTime(double orbitalPeriod, double orbitFraction, double centerTimeSeconds, float historyFraction)
-        {
-            const double aheadFraction = 0.15d;
-            double clampedHistory  = Mathf.Clamp01(historyFraction);
-            double totalSpan       = aheadFraction + clampedHistory * (1d - aheadFraction);
-            double clampedFraction = Clamp(orbitFraction, 0d, 1d);
-            // ИСПРАВЛЕНИЕ: Защита от отрицательного времени - орбиты не могут быть в прошлом до начала симуляции
-            double sampleTime = centerTimeSeconds + (aheadFraction - clampedFraction * totalSpan) * orbitalPeriod;
-            return Math.Max(0d, sampleTime);
-        }
-
-        private static int ResolveCurrentOrbitSampleIndex(int sampleCount, float historyFraction)
-        {
-            if (sampleCount <= 1) return 0;
-            const double aheadFraction = 0.15d;
-            double clampedHistory = Mathf.Clamp01(historyFraction);
-            double totalSpan      = aheadFraction + clampedHistory * (1d - aheadFraction);
-            double headT          = totalSpan > 0d ? aheadFraction / totalSpan : 0d;
-            return Mathf.Clamp(Mathf.RoundToInt((float)(headT * (sampleCount - 1))), 0, sampleCount - 1);
-        }
-
         private void ConfigureMoonOrbitRenderer(LineRenderer lineRenderer, bool loop, Color color)
         {
             ConfigureLineRenderer(lineRenderer, color, ResolveMoonOrbitLineWidth(), loop);
-            if (lineRenderer == null)
-            {
-                return;
-            }
-
-            const float aheadFraction = 0.15f;
-            float h     = Mathf.Clamp01(moonOrbitHistoryFraction);
-            float span  = aheadFraction + h * (1f - aheadFraction);
-            float headT = span > 0f ? aheadFraction / span : 0f;
-            lineRenderer.colorGradient = BuildMoonOrbitFadeGradient(color, headT);
+            // Default gradient (overridden per-moon in RebuildMoonOrbitLines)
+            lineRenderer.colorGradient = BuildMoonOrbitFadeGradient(color, 1f);
         }
 
-        private static Gradient BuildMoonOrbitFadeGradient(Color baseColor, float headT)
+        private static Gradient BuildMoonOrbitFadeGradient(Color baseColor, float headT, float orbitCount = 1f)
         {
             headT = Mathf.Clamp01(headT);
-            float tailT    = Mathf.Min(headT + 0.08f, 1f);
-            float midPastT = Mathf.Min(headT + 0.40f, 1f);
-
-            Color bright    = Color.Lerp(baseColor, Color.white, 0.75f); bright.a = 1f;
-            Color mid       = baseColor; mid.a = 1f;
-            Color dimFuture = new Color(baseColor.r * 0.50f, baseColor.g * 0.50f, baseColor.b * 0.50f, 1f);
-            Color dimPast   = new Color(baseColor.r * 0.18f, baseColor.g * 0.18f, baseColor.b * 0.18f, 1f);
+            Color bright = Color.Lerp(baseColor, Color.white, 0.75f); bright.a = 1f;
+            Color dim = new Color(baseColor.r * 0.04f, baseColor.g * 0.04f, baseColor.b * 0.04f, 1f);
 
             Gradient gradient = new Gradient();
             gradient.SetKeys(
                 new[]
                 {
-                    new GradientColorKey(dimFuture, 0f),
-                    new GradientColorKey(bright,    headT),
-                    new GradientColorKey(mid,       tailT),
-                    new GradientColorKey(dimPast,   midPastT),
-                    new GradientColorKey(dimPast,   1f)
+                    new GradientColorKey(dim,       0f),
+                    new GradientColorKey(baseColor, 0.70f),
+                    new GradientColorKey(bright,    headT)
                 },
                 new[]
                 {
-                    new GradientAlphaKey(baseColor.a * 0.40f, 0f),
-                    new GradientAlphaKey(1.00f,                headT),
-                    new GradientAlphaKey(baseColor.a * 0.80f,  tailT),
-                    new GradientAlphaKey(baseColor.a * 0.15f,  midPastT),
-                    new GradientAlphaKey(0.00f,                1f)
+                    new GradientAlphaKey(0f,         0f),
+                    new GradientAlphaKey(0.25f,      0.70f),
+                    new GradientAlphaKey(1f,         headT)
                 });
             return gradient;
         }
