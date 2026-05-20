@@ -207,6 +207,42 @@ namespace Galilego.Physics
             set => moonOrbitHistoryDays = Mathf.Clamp(value, 0.0007f, 365f);
         }
 
+        /// <summary>
+        /// Number of Galilean moons in the simulation.
+        /// </summary>
+        public int MoonCount => moonRails != null ? moonRails.Count : 0;
+
+        /// <summary>
+        /// Get the name of a moon by its rail index.
+        /// </summary>
+        public string GetMoonName(int moonIndex)
+        {
+            if (moonRails == null || moonIndex < 0 || moonIndex >= moonRails.Count)
+                return "Unknown";
+            return moonRails[moonIndex].Name;
+        }
+
+        /// <summary>
+        /// Get the orbital color for a moon's visual representation.
+        /// </summary>
+        public Color GetMoonOrbitColor(int moonIndex)
+        {
+            return ResolveMoonOrbitColor(moonIndex);
+        }
+
+        /// <summary>
+        /// Compute the absolute position of a moon at the given simulation time (Kepler solver).
+        /// Thread-safe: does not mutate state, pure math.
+        /// </summary>
+        public bool TryGetMoonPositionAtTime(int moonIndex, double timeSeconds, out Vector3d position)
+        {
+            position = Vector3d.Zero;
+            if (moonRails == null || moonIndex < 0 || moonIndex >= moonRails.Count)
+                return false;
+            EvaluateMoonState(moonRails[moonIndex], timeSeconds, out position, out _);
+            return true;
+        }
+
         private void Awake()
         {
             ResolveCameraReferences();

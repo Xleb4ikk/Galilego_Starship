@@ -48,6 +48,25 @@ namespace Galilego.Gameplay
         private Material dashedMaterial;
         private Vector3[] positionsBuffer = new Vector3[0];
 
+        // ─── Moon prediction ────────────────────────────────────────────────────
+        [Header("Moon Prediction")]
+        [SerializeField] private int moonPredictionSamples = 64;
+
+        private class MoonPredictionCache
+        {
+            public LineRenderer Line;
+            public GameObject Marker;
+            public Material MarkerMaterial;
+            public double CachedEndTime = double.MinValue;
+            public int CachedMoonCount = -1;
+            public Vector3[] LocalPositionsBuffer;
+            public bool ColorDirty = true;
+        }
+
+        private List<MoonPredictionCache> moonPredictionCaches = new List<MoonPredictionCache>();
+        private Transform moonPredictionRoot;
+        private bool moonPredictionNeedsRebuild = true;
+
         private FlightPlan flightPlan = new FlightPlan();
         private bool isDirty = false;
         private float dirtyTimer = 0f;
@@ -100,6 +119,7 @@ namespace Galilego.Gameplay
         private void OnDestroy()
         {
             CompleteAndDisposeJobs();
+            ClearMoonPredictionVisuals();
         }
 
         private void Update()
@@ -129,6 +149,7 @@ namespace Galilego.Gameplay
         private void LateUpdate()
         {
             UpdateMarkerPosition();
+            UpdateMoonPredictionVisuals();
         }
 
         private void UpdateVisibility()
@@ -160,6 +181,14 @@ namespace Galilego.Gameplay
             {
                 if (timeMarkerInstance.activeSelf != showLines)
                     timeMarkerInstance.SetActive(showLines);
+            }
+
+            foreach (var cache in moonPredictionCaches)
+            {
+                if (cache.Line != null && cache.Line.gameObject.activeSelf != showLines)
+                    cache.Line.gameObject.SetActive(showLines);
+                if (cache.Marker != null && cache.Marker.activeSelf != showLines)
+                    cache.Marker.SetActive(showLines);
             }
         }
 
@@ -903,6 +932,261 @@ namespace Galilego.Gameplay
         {
             int layer = LayerMask.NameToLayer("Trajectory");
             return layer >= 0 ? layer : 0;
+        }
+
+        // ─── Moon prediction visuals ────────────────────────────────────────────
+
+        private Transform GetMoonPredictionRoot()
+        {
+            if (moonPredictionRoot == null)
+            {
+                Transform parent = GetTrajectoryParent();
+                GameObject rootObj = new GameObject("MoonPredictions");
+                rootObj.transform.SetParent(parent, false);
+                rootObj.transform.localPosition = Vector3.zero;
+                rootObj.transform.localRotation = Quaternion.identity;
+                rootObj.transform.localScale = Vector3.one;
+                rootObj.layer = ResolveTrajectoryLayer();
+                moonPredictionRoot = rootObj.transform;
+            }
+            return moonPredictionRoot;
+        }
+
+        private void EnsureMoonPredictionCaches(int count)
+        {
+            int currentCount = moonPredictionCaches.Count;
+
+            if (currentCount == count && !moonPredictionNeedsRebuild)
+                return;
+
+            // Remove excess caches
+            while (moonPredictionCaches.Count > count)
+            {
+                int idx = moonPredictionCaches.Count - 1;
+                var cache = moonPredictionCaches[idx];
+                if (cache.Line != null && cache.Line.gameObject != null)
+                    UnityEngine.Object.Destroy(cache.Line.gameObject);
+                if (cache.Marker != null)
+                    UnityEngine.Object.Destroy(cache.Marker);
+                if (cache.MarkerMaterial != null)
+                    UnityEngine.Object.Destroy(cache.MarkerMaterial);
+                moonPredictionCaches.RemoveAt(idx);
+            }
+
+            // Create missing caches
+            while (moonPredictionCaches.Count < count)
+            {
+                int idx = moonPredictionCaches.Count;
+                Transform root = GetMoonPredictionRoot();
+
+                // Line renderer
+                GameObject lineObj = new GameObject($"MoonPredictionLine_{idx}");
+                lineObj.transform.SetParent(root, false);
+                lineObj.transform.localPosition = Vector3.zero;
+                lineObj.transform.localRotation = Quaternion.identity;
+                lineObj.layer = ResolveTrajectoryLayer();
+                LineRenderer line = lineObj.AddComponent<LineRenderer>();
+                line.useWorldSpace = false;
+                line.loop = false;
+                line.positionCount = 0;
+                line.startWidth = 0.1f;
+                line.endWidth = 0.1f;
+                line.alignment = LineAlignment.View;
+                line.numCornerVertices = 4;
+                line.numCapVertices = 4;
+                line.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                line.receiveShadows = false;
+                line.gameObject.SetActive(false);
+
+                // Marker sphere
+                GameObject marker = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+                marker.name = $"MoonPredictionMarker_{idx}";
+                marker.transform.SetParent(root, false);
+                marker.transform.localScale = Vector3.one * 0.4f;
+                marker.layer = ResolveTrajectoryLayer();
+                Renderer markerRenderer = marker.GetComponent<Renderer>();
+                Material markerMat;
+                if (markerRenderer.sharedMaterial != null)
+                    markerMat = new Material(markerRenderer.sharedMaterial);
+                else
+                    markerMat = new Material(GetDefaultMarkerShader());
+                markerMat.color = Color.white;
+                markerRenderer.material = markerMat;
+                marker.SetActive(false);
+
+                var collision = marker.GetComponent<Collider>();
+                if (collision != null) UnityEngine.Object.Destroy(collision);
+
+                var cache = new MoonPredictionCache
+                {
+                    Line = line,
+                    Marker = marker,
+                    MarkerMaterial = markerMat,
+                    CachedEndTime = double.MinValue,
+                    CachedMoonCount = -1
+                };
+                moonPredictionCaches.Add(cache);
+            }
+
+            moonPredictionNeedsRebuild = false;
+        }
+
+        private static Shader GetDefaultMarkerShader()
+        {
+            return Shader.Find("Universal Render Pipeline/Unlit") ??
+                   Shader.Find("Unlit/Color") ??
+                   Shader.Find("Sprites/Default") ??
+                   Shader.Find("Standard");
+        }
+
+        private void UpdateMoonPredictionVisuals()
+        {
+            if (universeManager == null || flightPlan == null)
+            {
+                HideMoonPredictionVisuals();
+                return;
+            }
+
+            double simTime = universeManager.SimulationTimeSeconds;
+            double endTime = universeManager.TrajectoryPreviewEndTime;
+
+            if (endTime <= simTime + 0.5)
+            {
+                HideMoonPredictionVisuals();
+                return;
+            }
+
+            int moonCount = universeManager.MoonCount;
+            if (moonCount == 0)
+            {
+                HideMoonPredictionVisuals();
+                return;
+            }
+
+            EnsureMoonPredictionCaches(moonCount);
+            bool show = universeManager.CameraMode == SpaceCameraMode.OrbitMap;
+            ReferenceFrameTarget frame = universeManager.ActiveReferenceFrame;
+            int samples = Math.Max(2, moonPredictionSamples);
+
+            float lineWidth = universeManager.ResolveWorldLineWidthForPixels(1.5f, 0.01f);
+            float markerScale = universeManager.ResolveWorldLineWidthForPixels(4f, 0.008f);
+            if (float.IsNaN(markerScale) || float.IsInfinity(markerScale) || markerScale <= 0.00001f)
+                markerScale = 0.4f;
+
+            // ── Precompute sample times and frame positions at each time ──────────
+            // Same as spacecraft trajectory: each point uses framePos AT THAT TIME,
+            // so (moonPos_t - framePos_t) creates realistic paths (loops etc.) in moving frames.
+            double[] sampleTimes = new double[samples];
+            Vector3d[] framePosAtTime = new Vector3d[samples];
+            for (int j = 0; j < samples; j++)
+            {
+                sampleTimes[j] = simTime + (endTime - simTime) * (j / (double)(samples - 1));
+                if (!universeManager.TryGetReferenceStateAtTime(
+                        frame, sampleTimes[j],
+                        out _, out framePosAtTime[j], out _,
+                        out _, out _, out _))
+                {
+                    framePosAtTime[j] = universeManager.JupiterPosition;
+                }
+            }
+
+            // Position root at frame pos at current simTime (same convention as moonOrbitRoot)
+            universeManager.ApplyVisualPosition(GetMoonPredictionRoot(), framePosAtTime[0]);
+
+            for (int i = 0; i < moonCount; i++)
+            {
+                var cache = moonPredictionCaches[i];
+
+                // ── Material / color setup (only when slider changed) ────────────
+                bool endTimeChanged = Math.Abs(endTime - cache.CachedEndTime) > 1.0;
+                if (endTimeChanged || cache.ColorDirty)
+                {
+                    cache.CachedEndTime = endTime;
+                    cache.ColorDirty = false;
+
+                    Color moonColor = universeManager.GetMoonOrbitColor(i);
+                    cache.MarkerMaterial.color = moonColor;
+
+                    var lineMaterial = cache.Line.material;
+                    bool isDefaultMat = lineMaterial == null ||
+                                        lineMaterial.name == "Default-Material" ||
+                                        lineMaterial.name.StartsWith("Default");
+                    if (isDefaultMat)
+                    {
+                        lineMaterial = new Material(GetDefaultMarkerShader());
+                        cache.Line.material = lineMaterial;
+                    }
+                    if (lineMaterial.HasProperty("_BaseColor"))
+                        lineMaterial.SetColor("_BaseColor", moonColor);
+                    else if (lineMaterial.HasProperty("_Color"))
+                        lineMaterial.SetColor("_Color", moonColor);
+                    else
+                        lineMaterial.color = moonColor;
+
+                    cache.Line.positionCount = samples;
+                }
+
+                // ── Compute moon positions and convert to frame-relative ─────────
+                // Each point uses per-point frame position: moonPos_at_t - framePos_at_t
+                // This mirrors how the spacecraft trajectory renders in CompleteBackBuffer
+                // and produces realistic looping paths when reference frame moves.
+                if (cache.Line != null)
+                {
+                    if (cache.LocalPositionsBuffer == null || cache.LocalPositionsBuffer.Length < samples)
+                        cache.LocalPositionsBuffer = new Vector3[samples];
+
+                    for (int j = 0; j < samples; j++)
+                    {
+                        if (universeManager.TryGetMoonPositionAtTime(i, sampleTimes[j], out Vector3d moonPos))
+                        {
+                            cache.LocalPositionsBuffer[j] = universeManager.ToUnityOffset(moonPos - framePosAtTime[j]);
+                        }
+                        else
+                        {
+                            cache.LocalPositionsBuffer[j] = Vector3.zero;
+                        }
+                    }
+
+                    cache.Line.SetPositions(cache.LocalPositionsBuffer);
+                    cache.Line.startWidth = lineWidth;
+                    cache.Line.endWidth = lineWidth;
+                    if (cache.Line.gameObject.activeSelf != show)
+                        cache.Line.gameObject.SetActive(show);
+                }
+
+                // ── Marker at endTime with per-point frame position ──────────────
+                if (cache.Marker != null)
+                {
+                    if (universeManager.TryGetMoonPositionAtTime(i, endTime, out Vector3d endMoonPos))
+                    {
+                        Vector3d endFramePos = framePosAtTime[samples - 1];
+                        cache.Marker.transform.localPosition = universeManager.ToUnityOffset(endMoonPos - endFramePos);
+                        cache.Marker.transform.localScale = Vector3.one * markerScale;
+                    }
+                    if (cache.Marker.activeSelf != show)
+                        cache.Marker.SetActive(show);
+                }
+            }
+        }
+
+        private void HideMoonPredictionVisuals()
+        {
+            foreach (var cache in moonPredictionCaches)
+            {
+                if (cache.Line != null) cache.Line.gameObject.SetActive(false);
+                if (cache.Marker != null) cache.Marker.SetActive(false);
+            }
+        }
+
+        private void ClearMoonPredictionVisuals()
+        {
+            if (moonPredictionRoot != null)
+            {
+                UnityEngine.Object.Destroy(moonPredictionRoot.gameObject);
+                moonPredictionRoot = null;
+            }
+            moonPredictionCaches.Clear();
+            moonPredictionNeedsRebuild = true;
         }
     }
 }
