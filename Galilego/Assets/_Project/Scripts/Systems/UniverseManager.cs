@@ -146,6 +146,14 @@ namespace Galilego.Physics
         private Transform orbitMapMarkerRoot;
         private LineRenderer jupiterOrbitRenderer;
         private TrajectoryPredictor shipTrajectoryPredictor;
+        private Transform shipHistoryRoot;
+        private LineRenderer shipHistoryLineRenderer;
+        private Vector3[] shipHistoryPointsBuffer = Array.Empty<Vector3>();
+        private readonly List<Vector3d> shipHistoryPositions = new List<Vector3d>();
+        private readonly List<double> shipHistoryTimes = new List<double>();
+        private double nextShipHistoryRecordTime;
+        private const double ShipHistoryFixedInterval = 5.0;
+        private const int MaxShipHistorySamples = 86400;
         private Material runtimeLineMaterial;
         private Material runtimeOrbitMapMarkerMaterial;
         private ReferenceFrameTarget lastActiveReferenceFrame = ReferenceFrameTarget.Jupiter;
@@ -324,33 +332,75 @@ namespace Galilego.Physics
                 {
                     trajectoryVisualRoot.gameObject.SetActive(shouldShow);
                 }
+
+                // ── Принудительно удаляем осиротевшие сегменты ManeuverEvaluator ──
+                // Эти сегменты создаются под trajectoryVisualRoot когда ManeuverEvaluator
+                // активен, но не удаляются при его отключении.
+                DestroyStaleManeuverSegments();
             }
-            
-            // КРИТИЧНО: Управляем видимостью траектории корабля
-            // shipTrajectoryPredictor является дочерним объектом trajectoryVisualRoot,
-            // но нужно дополнительно проверить условия видимости
-            if (shipTrajectoryPredictor != null)
+
+            // ── История корабля (серая линия, всегда в OrbitMap) ──
+            if (shipHistoryRoot != null && shouldShow)
             {
-                bool shouldShowShipTrajectory = showShipTrajectory && shouldShow;
-                
-                // Проверяем наличие манёвров только если нужно показать траекторию
-                if (shouldShowShipTrajectory && shouldShow)
+                // Position root at current frame (same as moonOrbitRoot)
+                ReferenceFrameTarget activeFrame = ResolveActiveReferenceFrameTarget();
+                if (!TryGetReferenceStateAtTime(
+                    activeFrame, simulationTimeSeconds,
+                    out _, out Vector3d currentFramePosition, out _,
+                    out _, out _, out _))
                 {
-                    var evaluator = FindAnyObjectByType<ManeuverEvaluator>();
-                    if (evaluator != null)
+                    currentFramePosition = jupiterRealPosition;
+                }
+                ApplyVisualPosition(shipHistoryRoot, currentFramePosition);
+
+                // Update history line points (frame-relative, trim to moonOrbitHistoryDays window)
+                if (shipHistoryLineRenderer != null && shipHistoryPositions.Count >= 2)
+                {
+                    double cutoffTime = simulationTimeSeconds - moonOrbitHistoryDays * 86400.0;
+                    int startIdx = 0;
+                    for (int i = 0; i < shipHistoryTimes.Count; i++)
                     {
-                        var flightPlan = evaluator.GetFlightPlan();
-                        if (flightPlan != null && flightPlan.Nodes.Count > 0)
+                        if (shipHistoryTimes[i] >= cutoffTime) { startIdx = i; break; }
+                    }
+                    int count = shipHistoryPositions.Count - startIdx;
+                    if (count < 2) { shipHistoryLineRenderer.positionCount = 0; }
+                    else
+                    {
+                        if (shipHistoryPointsBuffer.Length < count)
+                            shipHistoryPointsBuffer = new Vector3[count];
+                        for (int i = 0; i < count; i++)
                         {
-                            shouldShowShipTrajectory = false;
+                            shipHistoryPointsBuffer[i] = ToUnityOffset(
+                                shipHistoryPositions[startIdx + i] - currentFramePosition);
                         }
+                        shipHistoryLineRenderer.positionCount = count;
+                        shipHistoryLineRenderer.SetPositions(shipHistoryPointsBuffer);
+
+                        // Fade gradient: dim at start → bright at end
+                        Color dim = new Color(
+                            shipTrajectoryColor.r * 0.15f,
+                            shipTrajectoryColor.g * 0.15f,
+                            shipTrajectoryColor.b * 0.15f,
+                            shipTrajectoryColor.a * 0.15f);
+                        Gradient gradient = new Gradient();
+                        gradient.SetKeys(
+                            new[] { new GradientColorKey(dim, 0f), new GradientColorKey(shipTrajectoryColor, 1f) },
+                            new[] { new GradientAlphaKey(dim.a, 0f), new GradientAlphaKey(shipTrajectoryColor.a, 1f) });
+                        shipHistoryLineRenderer.colorGradient = gradient;
                     }
                 }
-                
-                if (shipTrajectoryPredictor.gameObject.activeSelf != shouldShowShipTrajectory)
+                else if (shipHistoryLineRenderer != null)
                 {
-                    shipTrajectoryPredictor.gameObject.SetActive(shouldShowShipTrajectory);
+                    shipHistoryLineRenderer.positionCount = 0;
                 }
+
+                if (shipHistoryRoot.gameObject.activeSelf != shouldShow)
+                    shipHistoryRoot.gameObject.SetActive(shouldShow);
+            }
+            else if (shipHistoryRoot != null)
+            {
+                if (shipHistoryRoot.gameObject.activeSelf)
+                    shipHistoryRoot.gameObject.SetActive(false);
             }
             
             // Управляем видимостью орбит лун
@@ -360,6 +410,22 @@ namespace Galilego.Physics
                 if (moonOrbitRoot.gameObject.activeSelf != shouldShowMoonOrbits)
                 {
                     moonOrbitRoot.gameObject.SetActive(shouldShowMoonOrbits);
+                }
+            }
+        }
+
+        private void DestroyStaleManeuverSegments()
+        {
+            if (trajectoryVisualRoot == null) return;
+            // Only clean up if ManeuverEvaluator is missing or inactive
+            var evaluator = FindAnyObjectByType<ManeuverEvaluator>();
+            if (evaluator != null && evaluator.isActiveAndEnabled) return;
+            for (int i = trajectoryVisualRoot.childCount - 1; i >= 0; i--)
+            {
+                Transform child = trajectoryVisualRoot.GetChild(i);
+                if (child != null && child.name.StartsWith("ManeuverSegment_"))
+                {
+                    Destroy(child.gameObject);
                 }
             }
         }
@@ -987,6 +1053,19 @@ namespace Galilego.Physics
             simulationTimeSeconds = stepStartTime + dt;
             shipBody.SetState(shipStep.Position, shipStep.Velocity);
             UpdateMoonBodies(simulationTimeSeconds);
+
+            // ── Record ship history (fixed 5s interval, display windowed by moonOrbitHistoryDays) ──
+            if (simulationTimeSeconds >= nextShipHistoryRecordTime || shipHistoryPositions.Count == 0)
+            {
+                nextShipHistoryRecordTime = simulationTimeSeconds + ShipHistoryFixedInterval;
+                shipHistoryPositions.Add(shipBody.Position);
+                shipHistoryTimes.Add(simulationTimeSeconds);
+                if (shipHistoryPositions.Count > MaxShipHistorySamples)
+                {
+                    shipHistoryPositions.RemoveAt(0);
+                    shipHistoryTimes.RemoveAt(0);
+                }
+            }
         }
 
         private Vector3d EvaluateShipAcceleration(Vector3d shipPosition, double sampleTimeSeconds)
@@ -3042,91 +3121,47 @@ namespace Galilego.Physics
             }
 
             ApplyVisualPosition(moonOrbitRoot, ResolveActiveReferenceVisualPosition());
+
+            // ── Ship history root (child of trajectoryVisualRoot, positioned at frame) ──
+            if (shipHistoryRoot == null)
+            {
+                shipHistoryRoot = FindChildByName(trajectoryVisualRoot, "Ship_History");
+                if (shipHistoryRoot == null)
+                {
+                    GameObject rootObj = new GameObject("Ship_History");
+                    shipHistoryRoot = rootObj.transform;
+                    shipHistoryRoot.SetParent(trajectoryVisualRoot, false);
+
+                    GameObject lineObj = new GameObject("Ship_History_Line");
+                    lineObj.transform.SetParent(shipHistoryRoot, false);
+                    shipHistoryLineRenderer = lineObj.AddComponent<LineRenderer>();
+                    shipHistoryLineRenderer.useWorldSpace = false;
+                    shipHistoryLineRenderer.loop = false;
+                    shipHistoryLineRenderer.positionCount = 0;
+                    shipHistoryLineRenderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                    shipHistoryLineRenderer.receiveShadows = false;
+                    ConfigureLineRenderer(shipHistoryLineRenderer, shipTrajectoryColor, shipTrajectoryWidth, false);
+                }
+            }
+            ApplyVisualPosition(shipHistoryRoot, ResolveActiveReferenceVisualPosition());
         }
 
                 private void EnsureShipTrajectoryVisualizer()
         {
-            if (trajectoryVisualRoot == null)
+            // ── Удаляем старую будущую траекторию (TrajectoryPredictor) навсегда ──
+            if (shipTrajectoryPredictor != null)
             {
-                return;
+                Destroy(shipTrajectoryPredictor.gameObject);
+                shipTrajectoryPredictor = null;
             }
 
-                        // ИСПРАВЛЕНИЕ: Орбита аппарата скрывается только если:
-            // 1. Включён режим OrbitMap
-            // 2. Есть ManeuverEvaluator в сцене
-            // 3. Есть узлы манёвров (flightPlan.Nodes.Count > 0)
-            bool hideForManeuverOrbitMap = false;
-            if (cameraMode == SpaceCameraMode.OrbitMap)
+            if (trajectoryVisualRoot == null) return;
+
+            Transform existing = FindChildByName(trajectoryVisualRoot, "Ship_Trajectory");
+            if (existing != null)
             {
-                var evaluator = FindAnyObjectByType<ManeuverEvaluator>();
-                if (evaluator != null)
-                {
-                    var flightPlan = evaluator.GetFlightPlan();
-                    hideForManeuverOrbitMap = flightPlan != null && flightPlan.Nodes.Count > 0;
-                }
+                Destroy(existing.gameObject);
             }
-
-            // Скрываем орбиту аппарата в режиме камеры корабля и в OrbitMap с манёврами
-            if (!showShipTrajectory || cameraMode != SpaceCameraMode.OrbitMap || hideForManeuverOrbitMap)
-            {
-                if (shipTrajectoryPredictor != null)
-                {
-                    shipTrajectoryPredictor.gameObject.SetActive(false);
-                }
-
-                return;
-            }
-
-            if (shipTrajectoryPredictor == null)
-            {
-                Transform existingTransform = FindChildByName(trajectoryVisualRoot, "Ship_Trajectory");
-                GameObject predictorObject;
-
-                if (existingTransform != null)
-                {
-                    predictorObject = existingTransform.gameObject;
-                }
-                else
-                {
-                    predictorObject = new GameObject("Ship_Trajectory");
-                    predictorObject.transform.SetParent(trajectoryVisualRoot, false);
-                }
-
-                predictorObject.layer = ResolveShipTrajectoryLayer();
-                LineRenderer lineRenderer = predictorObject.GetComponent<LineRenderer>();
-                if (lineRenderer == null)
-                {
-                    lineRenderer = predictorObject.AddComponent<LineRenderer>();
-                }
-
-                ConfigureLineRenderer(
-                    lineRenderer,
-                    shipTrajectoryColor,
-                    shipTrajectoryWidth,
-                    false);
-
-                shipTrajectoryPredictor = predictorObject.GetComponent<TrajectoryPredictor>();
-                if (shipTrajectoryPredictor == null)
-                {
-                    shipTrajectoryPredictor = predictorObject.AddComponent<TrajectoryPredictor>();
-                }
-            }
-
-            shipTrajectoryPredictor.gameObject.SetActive(true);
-            shipTrajectoryPredictor.gameObject.layer = ResolveShipTrajectoryLayer();
-
-            LineRenderer shipLineRenderer = shipTrajectoryPredictor.GetComponent<LineRenderer>();
-            ConfigureLineRenderer(shipLineRenderer, shipTrajectoryColor, shipTrajectoryWidth, false);
-
-            shipTrajectoryPredictor.Configure(this, shipLineRenderer);
-            shipTrajectoryPredictor.ConfigurePrediction(
-                shipPredictionSteps,
-                shipPredictionStepSeconds,
-                RecommendedSolverStepSeconds,
-                true,
-                shipPredictionRefreshInterval,
-                shipPredictionStepsPerBatch);
-            shipTrajectoryPredictor.ForceRefresh();
         }
 
         private void EnsureMoonOrbitVisualizers()

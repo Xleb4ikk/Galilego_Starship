@@ -145,18 +145,13 @@ namespace Galilego.Physics
                     break;
                 }
 
+                // ── Clear stale line BEFORE moving transform (prevents phantom orbit) ──
+                lineRenderer.positionCount = 0;
+
                 universeManager.ApplyVisualPosition(transform, startFramePosition);
                 transform.rotation = Quaternion.identity;
 
                 Vector3 firstPointLocal = universeManager.ToUnityOffset(startPosition - startFramePosition);
-                Debug.Log($"[TrajectoryDebug] Frame={referenceFrame} startFramePos={startFramePosition} " +
-                    $"transform.worldPos={transform.position} " +
-                    $"transform.localPos={transform.localPosition} " +
-                    $"parent.worldPos={(transform.parent != null ? transform.parent.position.ToString() : "null")} " +
-                    $"parent.localPos={(transform.parent != null ? transform.parent.localPosition.ToString() : "null")} " +
-                    $"jupiterWorldPos={universeManager.JupiterTransform.position} " +
-                    $"shipRealPos={startPosition} shipVelocity={startVelocity} " +
-                    $"firstPointLocal={firstPointLocal} firstPointDist={firstPointLocal.magnitude:F2}");
 
                 int clampedSteps = Math.Max(1, predictionSteps);
                 EnsurePointCapacity(clampedSteps + 1);
@@ -197,40 +192,17 @@ namespace Galilego.Physics
                         }
                     }
 
-                    cachedLocalPoints[pointsWritten] = universeManager.ToUnityOffset(predictedPosition - startFramePosition);
+                    // ── Per-point frame position (same pattern as ManeuverEvaluator.CompleteBackBuffer) ──
+                    // Each trajectory point uses framePos AT THAT SAMPLE TIME,
+                    // so the trajectory shows frame-relative motion (loops in moving frames).
+                    Vector3d framePosAtTime = startFramePosition;
+                    universeManager.TryGetReferenceStateAtTime(
+                        referenceFrame, predictedTimeSeconds,
+                        out _, out framePosAtTime, out _,
+                        out _, out _, out _);
+                    cachedLocalPoints[pointsWritten] = universeManager.ToUnityOffset(predictedPosition - framePosAtTime);
                     pointsWritten++;
                 }
-
-                // Debug: sample trajectory points at regular intervals
-                System.Text.StringBuilder sb = new System.Text.StringBuilder();
-                sb.Append($"[TrajectoryPoints] count={pointsWritten}");
-                double minDistFromOrigin = double.MaxValue;
-                int minDistIndex = -1;
-                int sampleInterval = Math.Max(1, pointsWritten / 8);
-                for (int i = 0; i < pointsWritten; i += sampleInterval)
-                {
-                    float dist = cachedLocalPoints[i].magnitude;
-                    sb.Append($" | [{i}] pos={cachedLocalPoints[i]} dist={dist:F2}");
-                    if (dist < minDistFromOrigin)
-                    {
-                        minDistFromOrigin = dist;
-                        minDistIndex = i;
-                    }
-                }
-                // Full-resolution scan for absolute minimum
-                for (int i = 0; i < pointsWritten; i++)
-                {
-                    float dist = cachedLocalPoints[i].magnitude;
-                    if (dist < minDistFromOrigin)
-                    {
-                        minDistFromOrigin = dist;
-                        minDistIndex = i;
-                    }
-                }
-                sb.Append($" | minDist={minDistFromOrigin:F2} at index={minDistIndex}");
-                Debug.Log(sb.ToString());
-
-                ApplyLine(pointsWritten);
             }
 
             rebuildCoroutine = null;

@@ -41,6 +41,7 @@ namespace Galilego.Gameplay
         private double[] backBufferTimes;
         private bool[] backBufferIsDashed;
         private int backBufferCount;
+        private int lastClipStartIdx = -1;
 
         private ReferenceFrameTarget lockedReferenceFrame;
 
@@ -116,9 +117,20 @@ namespace Galilego.Gameplay
             }
         }
 
+        private void OnDisable()
+        {
+            foreach (var line in segmentLines)
+            {
+                if (line != null && line.gameObject != null)
+                    line.gameObject.SetActive(false);
+            }
+            HideMoonPredictionVisuals();
+        }
+
         private void OnDestroy()
         {
             CompleteAndDisposeJobs();
+            ClearLines();
             ClearMoonPredictionVisuals();
         }
 
@@ -143,6 +155,7 @@ namespace Galilego.Gameplay
                 }
             }
 
+            UpdateTrajectoryClip();
             UpdateVisibility();
         }
 
@@ -152,11 +165,31 @@ namespace Galilego.Gameplay
             UpdateMoonPredictionVisuals();
         }
 
+        private void UpdateTrajectoryClip()
+        {
+            if (backBufferTimes == null || backBufferCount < 2) return;
+
+            double simTime = universeManager.SimulationTimeSeconds;
+            int newStartIdx = Array.BinarySearch(backBufferTimes, 0, backBufferCount, simTime);
+            if (newStartIdx < 0) newStartIdx = ~newStartIdx;
+            if (newStartIdx >= backBufferCount) newStartIdx = backBufferCount - 1;
+
+            if (newStartIdx != lastClipStartIdx)
+            {
+                CompleteBackBuffer(backBufferCount);
+            }
+        }
+
         private void UpdateVisibility()
         {
             if (universeManager == null) return;
 
             bool showLines = universeManager.CameraMode == SpaceCameraMode.OrbitMap;
+            // Only show trajectory when there are maneuver nodes (no default ballistic arc)
+            if (showLines)
+            {
+                showLines = flightPlan != null && flightPlan.Nodes.Count > 0;
+            }
 
             foreach (var line in segmentLines)
             {
@@ -699,9 +732,24 @@ namespace Galilego.Gameplay
             int validCount = Math.Min(count, backBufferPoints.Length);
             if (validCount == 0) return;
 
+            // Skip past points: only show future trajectory ahead of current ship time
+            double simTime = universeManager.SimulationTimeSeconds;
+            int startIdx = 0;
+            for (int i = 0; i < validCount; i++)
+            {
+                if (backBufferTimes[i] >= simTime)
+                {
+                    startIdx = i;
+                    break;
+                }
+            }
+            int remainingCount = validCount - startIdx;
+            lastClipStartIdx = startIdx;
+            if (remainingCount < 2) return;
+
             List<(int start, int end, bool isDashed)> runs = new List<(int, int, bool)>();
-            int runStart = 0;
-            for (int i = 1; i < validCount; i++)
+            int runStart = startIdx;
+            for (int i = startIdx + 1; i < validCount; i++)
             {
                 if (backBufferIsDashed[i] != backBufferIsDashed[runStart])
                 {

@@ -16,7 +16,7 @@ public class Orbit : MonoBehaviour
     public float fastSpeed = 30f;
 
     [Header("Time Scale (Real mode)")]
-    public float timeScale = 10000f;
+    public float timeScale = 1f;
 
     private float angle;
 
