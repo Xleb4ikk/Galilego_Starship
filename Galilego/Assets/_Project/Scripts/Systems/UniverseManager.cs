@@ -146,14 +146,17 @@ namespace Galilego.Physics
         private Transform orbitMapMarkerRoot;
         private LineRenderer jupiterOrbitRenderer;
         private TrajectoryPredictor shipTrajectoryPredictor;
+
+        // Ship position history (gray trail)
         private Transform shipHistoryRoot;
+        private ShipMarker shipMarker;
+        private List<Vector3d> shipHistoryPositions = new List<Vector3d>();
+        private List<double> shipHistoryTimes = new List<double>();
         private LineRenderer shipHistoryLineRenderer;
         private Vector3[] shipHistoryPointsBuffer = Array.Empty<Vector3>();
-        private readonly List<Vector3d> shipHistoryPositions = new List<Vector3d>();
-        private readonly List<double> shipHistoryTimes = new List<double>();
         private double nextShipHistoryRecordTime;
-        private const double ShipHistoryFixedInterval = 5.0;
-        private const int MaxShipHistorySamples = 86400;
+        private const double ShipHistoryRecordInterval = 5.0;
+        private const int MaxShipHistorySamples = 86400; // 5 days at 5s intervals
         private Material runtimeLineMaterial;
         private Material runtimeOrbitMapMarkerMaterial;
         private ReferenceFrameTarget lastActiveReferenceFrame = ReferenceFrameTarget.Jupiter;
@@ -377,15 +380,12 @@ namespace Galilego.Physics
                         shipHistoryLineRenderer.SetPositions(shipHistoryPointsBuffer);
 
                         // Fade gradient: dim at start → bright at end
-                        Color dim = new Color(
-                            shipTrajectoryColor.r * 0.15f,
-                            shipTrajectoryColor.g * 0.15f,
-                            shipTrajectoryColor.b * 0.15f,
-                            shipTrajectoryColor.a * 0.15f);
+                        Color gray = new Color(0.55f, 0.55f, 0.6f, 0.9f);
+                        Color dim = new Color(gray.r * 0.15f, gray.g * 0.15f, gray.b * 0.15f, gray.a * 0.05f);
                         Gradient gradient = new Gradient();
                         gradient.SetKeys(
-                            new[] { new GradientColorKey(dim, 0f), new GradientColorKey(shipTrajectoryColor, 1f) },
-                            new[] { new GradientAlphaKey(dim.a, 0f), new GradientAlphaKey(shipTrajectoryColor.a, 1f) });
+                            new[] { new GradientColorKey(dim, 0f), new GradientColorKey(gray, 1f) },
+                            new[] { new GradientAlphaKey(dim.a, 0f), new GradientAlphaKey(gray.a, 1f) });
                         shipHistoryLineRenderer.colorGradient = gradient;
                     }
                 }
@@ -402,7 +402,24 @@ namespace Galilego.Physics
                 if (shipHistoryRoot.gameObject.activeSelf)
                     shipHistoryRoot.gameObject.SetActive(false);
             }
-            
+
+            // ── Ship marker ──
+            Vector3 markerPos = Vector3.zero;
+            bool showMarker = false;
+            if (shipMarker != null && shouldShow && shipBody != null)
+            {
+                ReferenceFrameTarget activeFrame = ResolveActiveReferenceFrameTarget();
+                if (!TryGetReferenceStateAtTime(activeFrame, simulationTimeSeconds,
+                    out _, out Vector3d framePos, out _, out _, out _, out _))
+                {
+                    framePos = jupiterRealPosition;
+                }
+                markerPos = ToUnityOffset(shipBody.Position - framePos);
+                showMarker = true;
+            }
+            if (shipMarker != null)
+                shipMarker.SetPositionAndVisibility(markerPos, showMarker);
+
             // Управляем видимостью орбит лун
             if (moonOrbitRoot != null)
             {
@@ -984,6 +1001,8 @@ namespace Galilego.Physics
 
         private void EnsureInitialized()
         {
+            DestroyAllTrajectoryPredictors();
+
             if (shipBody == null || jupiterBody == null || moonBodies.Count != moonRails.Count)
             {
                 InitializeBodies();
@@ -1054,16 +1073,17 @@ namespace Galilego.Physics
             shipBody.SetState(shipStep.Position, shipStep.Velocity);
             UpdateMoonBodies(simulationTimeSeconds);
 
-            // ── Record ship history (fixed 5s interval, display windowed by moonOrbitHistoryDays) ──
-            if (simulationTimeSeconds >= nextShipHistoryRecordTime || shipHistoryPositions.Count == 0)
+            // Record ship position history at fixed intervals
+            if (simulationTimeSeconds >= nextShipHistoryRecordTime)
             {
-                nextShipHistoryRecordTime = simulationTimeSeconds + ShipHistoryFixedInterval;
+                nextShipHistoryRecordTime = simulationTimeSeconds + ShipHistoryRecordInterval;
                 shipHistoryPositions.Add(shipBody.Position);
                 shipHistoryTimes.Add(simulationTimeSeconds);
                 if (shipHistoryPositions.Count > MaxShipHistorySamples)
                 {
-                    shipHistoryPositions.RemoveAt(0);
-                    shipHistoryTimes.RemoveAt(0);
+                    int removeCount = shipHistoryPositions.Count - MaxShipHistorySamples;
+                    shipHistoryPositions.RemoveRange(0, removeCount);
+                    shipHistoryTimes.RemoveRange(0, removeCount);
                 }
             }
         }
@@ -3140,28 +3160,50 @@ namespace Galilego.Physics
                     shipHistoryLineRenderer.positionCount = 0;
                     shipHistoryLineRenderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
                     shipHistoryLineRenderer.receiveShadows = false;
-                    ConfigureLineRenderer(shipHistoryLineRenderer, shipTrajectoryColor, shipTrajectoryWidth, false);
+                    ConfigureLineRenderer(shipHistoryLineRenderer, new Color(0.55f, 0.55f, 0.6f, 0.9f), shipTrajectoryWidth, false);
                 }
             }
             ApplyVisualPosition(shipHistoryRoot, ResolveActiveReferenceVisualPosition());
+
+            // ── Ship marker (satellite icon, positioned at ship position) ──
+            if (shipMarker == null)
+            {
+                shipMarker = FindChildByName(trajectoryVisualRoot, "Ship_Marker")?.GetComponent<ShipMarker>();
+                if (shipMarker == null)
+                {
+                    GameObject markerObj = new GameObject("Ship_Marker");
+                    markerObj.transform.SetParent(trajectoryVisualRoot, false);
+                    shipMarker = markerObj.AddComponent<ShipMarker>();
+                    shipMarker.Initialize(
+                        GetOrCreateRuntimeLineMaterial(),
+                        ResolveShipTrajectoryLayer());
+                }
+            }
         }
 
-                private void EnsureShipTrajectoryVisualizer()
+        private void EnsureShipTrajectoryVisualizer()
         {
-            // ── Удаляем старую будущую траекторию (TrajectoryPredictor) навсегда ──
+            DestroyAllTrajectoryPredictors();
+            
             if (shipTrajectoryPredictor != null)
             {
-                Destroy(shipTrajectoryPredictor.gameObject);
+                if (shipTrajectoryPredictor.gameObject != null)
+                    Destroy(shipTrajectoryPredictor.gameObject);
                 shipTrajectoryPredictor = null;
             }
+        }
 
-            if (trajectoryVisualRoot == null) return;
-
-            Transform existing = FindChildByName(trajectoryVisualRoot, "Ship_Trajectory");
-            if (existing != null)
+        private void DestroyAllTrajectoryPredictors()
+        {
+            var allPredictors = FindObjectsByType<TrajectoryPredictor>(FindObjectsInactive.Include, FindObjectsSortMode.None);
+            bool anyFound = allPredictors.Length > 0;
+            foreach (var p in allPredictors)
             {
-                Destroy(existing.gameObject);
+                if (p != null && p.gameObject != null)
+                    Destroy(p.gameObject);
             }
+            if (anyFound)
+                Debug.Log("[UniverseManager] Destroyed " + allPredictors.Length + " old TrajectoryPredictor(s)");
         }
 
         private void EnsureMoonOrbitVisualizers()
@@ -3577,9 +3619,7 @@ namespace Galilego.Physics
         private void ConfigureLineRenderer(LineRenderer lineRenderer, Color color, float width, bool loop)
         {
             if (lineRenderer == null)
-            {
                 return;
-            }
 
             lineRenderer.useWorldSpace = false;
             lineRenderer.loop = loop;

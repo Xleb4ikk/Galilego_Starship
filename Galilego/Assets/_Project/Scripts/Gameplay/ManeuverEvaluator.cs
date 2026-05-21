@@ -18,6 +18,8 @@ namespace Galilego.Gameplay
         [SerializeField] private GameObject timeMarkerPrefab;
         private GameObject timeMarkerInstance;
         private List<LineRenderer> segmentLines = new List<LineRenderer>();
+        private List<bool> segmentIsDashed = new List<bool>();
+        private LineRenderer ballisticLine;
 
         [Header("Prediction Settings")]
         [SerializeField] private double predictionStepSeconds = 10.0d;
@@ -47,6 +49,7 @@ namespace Galilego.Gameplay
 
         private Material solidMaterial;
         private Material dashedMaterial;
+        private Material ballisticMaterial;
         private Vector3[] positionsBuffer = new Vector3[0];
 
         // ─── Moon prediction ────────────────────────────────────────────────────
@@ -93,14 +96,26 @@ namespace Galilego.Gameplay
 
         private NativeArray<MoonOrbitData> nativeMoonOrbits;
         private NativeArray<ManeuverNodeData> nativeNodeData;
+        private NativeArray<ManeuverNodeData> nativeBallisticNodeData;
         private NativeArray<double> nativeEphemerisTimes;
         private NativeArray<BodyState> nativeEphemerisResults;
         private NativeArray<double3> nativeEphemerisVelocities;
         private NativeArray<TrajectoryPoint> nativeTrajectoryOutput;
+        private NativeArray<TrajectoryPoint> nativeBallisticOutput;
         private NativeArray<SegmentBoundaryState> nativeBoundaries;
         private NativeReference<int> nativePointCount;
+        private NativeReference<int> nativeBallisticPointCount;
         private NativeReference<int> nativeBoundaryCount;
         private NativeReference<int> nativeCalcStatus;
+        private NativeReference<int> nativeBallisticCalcStatus;
+
+        // Ballistic job (no maneuvers) needs its own boundary containers
+        private NativeArray<SegmentBoundaryState> nativeBallisticBoundaries;
+        private NativeReference<int> nativeBallisticBoundaryCount;
+
+        private Vector3[] ballisticPositions;
+        private double[] ballisticTimesData;
+        private int ballisticCount;
 
         private void Start()
         {
@@ -163,6 +178,46 @@ namespace Galilego.Gameplay
         {
             UpdateMarkerPosition();
             UpdateMoonPredictionVisuals();
+            ShrinkPassedSegments();
+        }
+
+        private void ShrinkPassedSegments()
+        {
+            double simTime = universeManager.SimulationTimeSeconds;
+
+            // Clip maneuver trajectory segments
+            if (backBufferTimes != null && backBufferCount >= 2)
+            {
+                int newStartIdx = Array.BinarySearch(backBufferTimes, 0, backBufferCount, simTime);
+                if (newStartIdx < 0) newStartIdx = ~newStartIdx;
+                if (newStartIdx >= backBufferCount) newStartIdx = backBufferCount - 1;
+
+                if (newStartIdx != lastClipStartIdx)
+                {
+                    CompleteBackBuffer(backBufferCount);
+                }
+            }
+
+            // Clip ballistic prediction line
+            if (ballisticTimesData != null && ballisticCount >= 2 && ballisticLine != null)
+            {
+                int bStart = Array.BinarySearch(ballisticTimesData, 0, ballisticCount, simTime);
+                if (bStart < 0) bStart = ~bStart;
+                if (bStart >= ballisticCount) bStart = ballisticCount - 1;
+
+                int bRemaining = ballisticCount - bStart;
+                if (bRemaining < 2)
+                {
+                    ballisticLine.positionCount = 0;
+                }
+                else
+                {
+                    var clipped = new Vector3[bRemaining];
+                    Array.Copy(ballisticPositions, bStart, clipped, 0, bRemaining);
+                    ballisticLine.positionCount = bRemaining;
+                    ballisticLine.SetPositions(clipped);
+                }
+            }
         }
 
         private void UpdateTrajectoryClip()
@@ -184,44 +239,68 @@ namespace Galilego.Gameplay
         {
             if (universeManager == null) return;
 
-            bool showLines = universeManager.CameraMode == SpaceCameraMode.OrbitMap;
-            // Only show trajectory when there are maneuver nodes (no default ballistic arc)
-            if (showLines)
+            bool inOrbitMap = universeManager.CameraMode == SpaceCameraMode.OrbitMap;
+            bool hasPrediction = universeManager.TrajectoryPreviewEndTime > universeManager.SimulationTimeSeconds + 0.5;
+            bool hasNodes = flightPlan != null && flightPlan.Nodes.Count > 0;
+
+            // Ballistic prediction line (purple, no maneuvers): shown when slider is active
+            bool showBallistic = inOrbitMap && hasPrediction;
+            if (ballisticLine != null && ballisticLine.gameObject.activeSelf != showBallistic)
+                ballisticLine.gameObject.SetActive(showBallistic);
+            if (showBallistic && ballisticLine != null)
             {
-                showLines = flightPlan != null && flightPlan.Nodes.Count > 0;
+                float w = universeManager.ResolveWorldLineWidthForPixels(2.25f, 0.02f);
+                ballisticLine.startWidth = w;
+                ballisticLine.endWidth = w;
+                ballisticLine.alignment = LineAlignment.View;
+                ballisticLine.numCornerVertices = 6;
+                ballisticLine.numCapVertices = 6;
             }
 
-            foreach (var line in segmentLines)
+            // Maneuver trajectory segments: hide solid (replaced by ballistic line), show dashed burns only
+            bool showSolid = false;
+            bool showDashed = inOrbitMap && hasNodes;
+
+            for (int li = 0; li < segmentLines.Count; li++)
             {
+                var line = segmentLines[li];
                 if (line != null && line.positionCount > 0)
                 {
-                    if (line.gameObject.activeSelf != showLines)
-                        line.gameObject.SetActive(showLines);
+                    bool isDashed = li < segmentIsDashed.Count && segmentIsDashed[li];
+                    bool showThis = isDashed ? showDashed : showSolid;
+                    if (line.gameObject.activeSelf != showThis)
+                        line.gameObject.SetActive(showThis);
                 }
 
-                if (showLines && line != null && line.positionCount > 1)
+                if (line != null && line.positionCount > 1)
                 {
-                    float width = universeManager.ResolveWorldLineWidthForPixels(2.25f, 0.02f);
-                    line.startWidth = width;
-                    line.endWidth = width;
-                    line.alignment = LineAlignment.View;
-                    line.numCornerVertices = 6;
-                    line.numCapVertices = 6;
+                    bool isDashed = li < segmentIsDashed.Count && segmentIsDashed[li];
+                    bool showWidth = isDashed ? showDashed : showSolid;
+                    if (showWidth)
+                    {
+                        float width = universeManager.ResolveWorldLineWidthForPixels(2.25f, 0.02f);
+                        line.startWidth = width;
+                        line.endWidth = width;
+                        line.alignment = LineAlignment.View;
+                        line.numCornerVertices = 6;
+                        line.numCapVertices = 6;
+                    }
                 }
             }
 
+            bool showAny = showSolid || showDashed;
             if (timeMarkerInstance != null)
             {
-                if (timeMarkerInstance.activeSelf != showLines)
-                    timeMarkerInstance.SetActive(showLines);
+                if (timeMarkerInstance.activeSelf != showAny)
+                    timeMarkerInstance.SetActive(showAny);
             }
 
             foreach (var cache in moonPredictionCaches)
             {
-                if (cache.Line != null && cache.Line.gameObject.activeSelf != showLines)
-                    cache.Line.gameObject.SetActive(showLines);
-                if (cache.Marker != null && cache.Marker.activeSelf != showLines)
-                    cache.Marker.SetActive(showLines);
+                if (cache.Line != null && cache.Line.gameObject.activeSelf != showAny)
+                    cache.Line.gameObject.SetActive(showAny);
+                if (cache.Marker != null && cache.Marker.activeSelf != showAny)
+                    cache.Marker.SetActive(showAny);
             }
         }
 
@@ -477,6 +556,8 @@ namespace Galilego.Gameplay
             for (int i = 0; i < jobNodeCount; i++)
                 nativeNodeData[i] = JobTypeConversion.ToNodeData(flightPlan.Nodes[jobNodeOffset + i]);
 
+            nativeBallisticNodeData = new NativeArray<ManeuverNodeData>(0, Allocator.Persistent);
+
             double3 jupiterPos = JobTypeConversion.ToDouble3(universeManager.JupiterPosition);
             double jupiterSGP = universeManager.JupiterSGP;
             int planeMapping = universeManager.CurrentPlaneMapping == AstrodynamicPlaneMapping.UnityXyPlaneZUp ? 0 : 1;
@@ -509,11 +590,18 @@ namespace Galilego.Gameplay
 
             nativeTrajectoryOutput = new NativeArray<TrajectoryPoint>(
                 adjustedMaxPoints, Allocator.Persistent);
+            nativeBallisticOutput = new NativeArray<TrajectoryPoint>(
+                adjustedMaxPoints, Allocator.Persistent);
             nativePointCount = new NativeReference<int>(0, Allocator.Persistent);
+            nativeBallisticPointCount = new NativeReference<int>(0, Allocator.Persistent);
             nativeBoundaries = new NativeArray<SegmentBoundaryState>(
                 nodeCount + 2, Allocator.Persistent);
             nativeBoundaryCount = new NativeReference<int>(0, Allocator.Persistent);
             nativeCalcStatus = new NativeReference<int>(0, Allocator.Persistent);
+            nativeBallisticCalcStatus = new NativeReference<int>(0, Allocator.Persistent);
+
+            nativeBallisticBoundaries = new NativeArray<SegmentBoundaryState>(1, Allocator.Persistent);
+            nativeBallisticBoundaryCount = new NativeReference<int>(0, Allocator.Persistent);
 
             if (moonCount > 0)
             {
@@ -540,6 +628,43 @@ namespace Galilego.Gameplay
             {
                 ephemerisJobHandle = default;
             }
+
+            var ballisticTrajectoryJob = new FullTrajectoryJob
+            {
+                Nodes = nativeBallisticNodeData, // empty — no maneuvers, pure ballistic
+                MoonEphemeris = nativeEphemerisResults,
+                EphemerisTimes = nativeEphemerisTimes,
+                MoonVelocities = nativeEphemerisVelocities,
+                MoonCount = moonCount,
+                PlaneMapping = planeMapping,
+
+                StartPos = startPos,
+                StartVel = startVel,
+                StartTime = startTime,
+
+                JupiterPosition = jupiterPos,
+                JupiterSGP = jupiterSGP,
+
+                MajorStepSeconds = majorStep,
+                SubstepLimitSeconds = substepLimit,
+                MaxSubstepsPerSegment = maxSubsteps,
+                MaxPoints = adjustedMaxPoints,
+                MaxStepsPerSegment = (int)Math.Min(
+                    ((long)(effectivePrediction / Math.Max(1e-6, majorStep)) + 1) * maxSubsteps + 100000,
+                    int.MaxValue / 2),
+
+                PredictionLengthSeconds = remainingPrediction > 0.0 ? remainingPrediction : requestedPrediction,
+                MaxPredictionLengthSeconds = maxPredictionLengthSeconds,
+
+                OutputPoints = nativeBallisticOutput,
+                PointCount = nativeBallisticPointCount,
+                CalculationStatus = nativeBallisticCalcStatus,
+
+                SegmentBoundaries = nativeBallisticBoundaries,
+                SegmentBoundaryCount = nativeBallisticBoundaryCount
+            };
+
+            var ballisticHandle = ballisticTrajectoryJob.Schedule(ephemerisJobHandle);
 
             var trajectoryJob = new FullTrajectoryJob
             {
@@ -576,7 +701,7 @@ namespace Galilego.Gameplay
                 SegmentBoundaryCount = nativeBoundaryCount
             };
 
-            trajectoryJobHandle = trajectoryJob.Schedule(ephemerisJobHandle);
+            trajectoryJobHandle = trajectoryJob.Schedule(ballisticHandle);
             JobHandle.ScheduleBatchedJobs();
             isJobRunning = true;
 
@@ -676,6 +801,28 @@ namespace Galilego.Gameplay
                 CompleteBackBuffer(backBufferCount);
             }
 
+            // Process ballistic trajectory (no maneuvers) for the purple prediction line
+            int ballisticCountJob = nativeBallisticPointCount.IsCreated ? nativeBallisticPointCount.Value : 0;
+            int ballisticStatus = nativeBallisticCalcStatus.IsCreated ? nativeBallisticCalcStatus.Value : 0;
+            if (ballisticCountJob > 0 && ballisticStatus == 1 && nativeBallisticOutput.IsCreated)
+            {
+                int bCount = Math.Min(ballisticCountJob, nativeBallisticOutput.Length);
+                ballisticPositions = new Vector3[bCount];
+                ballisticTimesData = new double[bCount];
+                Vector3d framePos = Vector3d.Zero, frameVel = Vector3d.Zero;
+                for (int i = 0; i < bCount; i++)
+                {
+                    var pt = nativeBallisticOutput[i];
+                    TryUpdateFrameState(ref framePos, ref frameVel, pt.Time);
+                    Vector3d absPos = JobTypeConversion.ToVector3d(pt.Position);
+                    Vector3d relPos = absPos - framePos;
+                    ballisticPositions[i] = universeManager.ToUnityOffset(relPos);
+                    ballisticTimesData[i] = pt.Time;
+                }
+                ballisticCount = bCount;
+                UpdateBallisticLine();
+            }
+
             DisposeJobResources();
             isJobRunning = false;
             UpdateVisibility();
@@ -685,14 +832,20 @@ namespace Galilego.Gameplay
         {
             if (nativeMoonOrbits.IsCreated) nativeMoonOrbits.Dispose();
             if (nativeNodeData.IsCreated) nativeNodeData.Dispose();
+            if (nativeBallisticNodeData.IsCreated) nativeBallisticNodeData.Dispose();
             if (nativeEphemerisTimes.IsCreated) nativeEphemerisTimes.Dispose();
             if (nativeEphemerisResults.IsCreated) nativeEphemerisResults.Dispose();
             if (nativeEphemerisVelocities.IsCreated) nativeEphemerisVelocities.Dispose();
             if (nativeTrajectoryOutput.IsCreated) nativeTrajectoryOutput.Dispose();
+            if (nativeBallisticOutput.IsCreated) nativeBallisticOutput.Dispose();
             if (nativeBoundaries.IsCreated) nativeBoundaries.Dispose();
             if (nativePointCount.IsCreated) nativePointCount.Dispose();
+            if (nativeBallisticPointCount.IsCreated) nativeBallisticPointCount.Dispose();
             if (nativeBoundaryCount.IsCreated) nativeBoundaryCount.Dispose();
             if (nativeCalcStatus.IsCreated) nativeCalcStatus.Dispose();
+            if (nativeBallisticCalcStatus.IsCreated) nativeBallisticCalcStatus.Dispose();
+            if (nativeBallisticBoundaries.IsCreated) nativeBallisticBoundaries.Dispose();
+            if (nativeBallisticBoundaryCount.IsCreated) nativeBallisticBoundaryCount.Dispose();
         }
 
         private void CompleteAndDisposeJobs()
@@ -793,6 +946,7 @@ namespace Galilego.Gameplay
                         ? (dashedMaterial ?? CreateDefaultDashedMaterial())
                         : (solidMaterial ?? CreateDefaultSolidMaterial());
                     line.gameObject.SetActive(true);
+                    segmentIsDashed[lineIdx] = run.isDashed;
                     lineIdx++;
                 }
             }
@@ -804,6 +958,8 @@ namespace Galilego.Gameplay
                     segmentLines[i].positionCount = 0;
                     segmentLines[i].gameObject.SetActive(false);
                 }
+                if (i < segmentIsDashed.Count)
+                    segmentIsDashed[i] = false;
             }
         }
 
@@ -813,6 +969,14 @@ namespace Galilego.Gameplay
             solidMaterial = new Material(shader);
             solidMaterial.color = new Color(0.5f, 0.5f, 1f, 0.9f);
             return solidMaterial;
+        }
+
+        private Material CreateDefaultBallisticMaterial()
+        {
+            Shader shader = Shader.Find("Unlit/Color") ?? Shader.Find("Standard");
+            ballisticMaterial = new Material(shader);
+            ballisticMaterial.color = new Color(0.5f, 0.5f, 1f, 0.9f);
+            return ballisticMaterial;
         }
 
         private Material CreateDefaultDashedMaterial()
@@ -840,7 +1004,40 @@ namespace Galilego.Gameplay
                 lr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
                 lr.receiveShadows = false;
                 segmentLines.Add(lr);
+                segmentIsDashed.Add(false);
             }
+        }
+
+        private void EnsureBallisticLine()
+        {
+            if (ballisticLine != null) return;
+            GameObject obj = new GameObject("BallisticPrediction");
+            obj.transform.SetParent(GetTrajectoryParent(), false);
+            obj.layer = ResolveTrajectoryLayer();
+            var lr = obj.AddComponent<LineRenderer>();
+            lr.useWorldSpace = false;
+            lr.startWidth = 0.2f;
+            lr.endWidth = 0.2f;
+            lr.alignment = LineAlignment.View;
+            lr.numCornerVertices = 6;
+            lr.numCapVertices = 6;
+            lr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            lr.receiveShadows = false;
+            lr.material = ballisticMaterial ?? CreateDefaultBallisticMaterial();
+            lr.enabled = true;
+            ballisticLine = lr;
+        }
+
+        private void UpdateBallisticLine()
+        {
+            if (ballisticPositions == null || ballisticCount < 2)
+            {
+                if (ballisticLine != null) ballisticLine.positionCount = 0;
+                return;
+            }
+            EnsureBallisticLine();
+            ballisticLine.positionCount = ballisticCount;
+            ballisticLine.SetPositions(ballisticPositions);
         }
 
         public bool TryGetTrajectoryPositionAtTime(double targetTime, out Vector3d position)
@@ -946,6 +1143,15 @@ namespace Galilego.Gameplay
                     UnityEngine.Object.Destroy(line.gameObject);
             }
             segmentLines.Clear();
+            segmentIsDashed.Clear();
+
+            if (ballisticLine != null)
+            {
+                UnityEngine.Object.Destroy(ballisticLine.gameObject);
+                ballisticLine = null;
+            }
+            ballisticPositions = null;
+            ballisticCount = 0;
         }
 
         private double ResolveSubstepLimitSeconds(double majorStepSeconds)
