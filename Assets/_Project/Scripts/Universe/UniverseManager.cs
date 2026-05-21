@@ -3395,7 +3395,15 @@ namespace Galilego.Universe
                 double t = effectiveSamples <= 1 ? 0d : (double)sampleIndex / lastIndex;
                 double sampleTime = orbitTime - historySeconds + t * historySeconds;
 
-                jupiterOrbitRenderer.SetPosition(sampleIndex, ToUnityOffset(jupiterRealPosition - currentFramePosition));
+                if (!TryGetReferenceStateAtTime(activeFrame, sampleTime,
+                    out _, out Vector3d framePosAtSample, out _, out _, out _, out _))
+                {
+                    framePosAtSample = jupiterRealPosition;
+                }
+
+                jupiterOrbitRenderer.SetPosition(
+                    sampleIndex,
+                    ToUnityOffset(jupiterRealPosition - framePosAtSample));
             }
         }
 

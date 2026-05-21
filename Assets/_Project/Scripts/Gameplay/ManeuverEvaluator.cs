@@ -86,6 +86,7 @@ namespace Galilego.Gameplay
         private double3? cachedStartVel;
         private double? cachedStartTime;
         private double? cachedPredictionLength;
+        private ReferenceFrameTarget cachedReferenceFrame = ReferenceFrameTarget.Jupiter;
         private List<ManeuverNodeData> cachedNodeData = new List<ManeuverNodeData>();
 
         // Cached marker position for use during scrubbing (when fullTrajectoryPoints is cleared)
@@ -124,6 +125,18 @@ namespace Galilego.Gameplay
         private double[] ballisticTimesData;
         private int ballisticCount;
 
+        private void OnEnable()
+        {
+            if (universeManager == null)
+                universeManager = FindAnyObjectByType<UniverseManager>();
+
+            if (universeManager != null)
+            {
+                universeManager.ActiveReferenceFrameChanged -= HandleActiveReferenceFrameChanged;
+                universeManager.ActiveReferenceFrameChanged += HandleActiveReferenceFrameChanged;
+            }
+        }
+
         private void Start()
         {
             if (universeManager == null)
@@ -141,6 +154,9 @@ namespace Galilego.Gameplay
 
         private void OnDisable()
         {
+            if (universeManager != null)
+                universeManager.ActiveReferenceFrameChanged -= HandleActiveReferenceFrameChanged;
+
             foreach (var line in segmentLines)
             {
                 if (line != null && line.gameObject != null)
@@ -346,9 +362,17 @@ namespace Galilego.Gameplay
             isDirty = true;
         }
 
+        private void HandleActiveReferenceFrameChanged(ReferenceFrameTarget _)
+        {
+            MarkAsDirty();
+        }
+
         private bool MatchesCachedInput()
         {
             if (!cachedStartPos.HasValue || !cachedStartVel.HasValue || !cachedStartTime.HasValue)
+                return false;
+
+            if (universeManager.ActiveReferenceFrame != cachedReferenceFrame)
                 return false;
 
             double3 pos = JobTypeConversion.ToDouble3(universeManager.ShipBody.Position);
@@ -392,6 +416,8 @@ namespace Galilego.Gameplay
             cachedPredictionLength = flightPlan.PredictionLengthSeconds > 0d
                 ? flightPlan.PredictionLengthSeconds
                 : defaultPredictionLengthSeconds;
+
+            cachedReferenceFrame = lockedReferenceFrame;
 
             cachedNodeData.Clear();
             for (int i = 0; i < flightPlan.Nodes.Count; i++)
@@ -666,6 +692,7 @@ namespace Galilego.Gameplay
                 MoonVelocities = nativeEphemerisVelocities,
                 MoonCount = moonCount,
                 PlaneMapping = planeMapping,
+                ReferenceFrameIndex = (int)lockedReferenceFrame,
 
                 StartPos = startPos,
                 StartVel = startVel,
@@ -703,6 +730,7 @@ namespace Galilego.Gameplay
                 MoonVelocities = nativeEphemerisVelocities,
                 MoonCount = moonCount,
                 PlaneMapping = planeMapping,
+                ReferenceFrameIndex = (int)lockedReferenceFrame,
 
                 StartPos = startPos,
                 StartVel = startVel,

@@ -14,6 +14,7 @@ namespace Galilego.Simulation
         [ReadOnly] public NativeArray<double3> MoonVelocities;
         public int MoonCount;
         public int PlaneMapping;
+        public int ReferenceFrameIndex;
 
         public double3 StartPos;
         public double3 StartVel;
@@ -98,7 +99,10 @@ namespace Galilego.Simulation
                 {
                     if (hasCurrentNode)
                     {
-                        double3 dv = CalculateWorldDeltaV(currentPos, currentVel, currentNode);
+                        ResolveReferenceFrameState(currentTime, out double3 framePos, out double3 frameVel);
+                        double3 localPos = currentPos - framePos;
+                        double3 localVel = currentVel - frameVel;
+                        double3 dv = CalculateWorldDeltaV(localPos, localVel, currentNode);
                         currentVel += dv;
                         totalPoints = AddPoint(OutputPoints, totalPoints, MaxPoints, currentPos, currentTime, 1);
 
@@ -193,7 +197,10 @@ namespace Galilego.Simulation
 
                 if (hasCurrentNode && !trajectoryLimit)
                 {
-                    double3 dv = CalculateWorldDeltaV(currentPos, currentVel, currentNode);
+                    ResolveReferenceFrameState(currentTime, out double3 framePos, out double3 frameVel);
+                    double3 localPos = currentPos - framePos;
+                    double3 localVel = currentVel - frameVel;
+                    double3 dv = CalculateWorldDeltaV(localPos, localVel, currentNode);
                     currentVel += dv;
 
                     totalPoints = AddPoint(OutputPoints, totalPoints, MaxPoints,
@@ -327,6 +334,37 @@ namespace Galilego.Simulation
             double invDist = 1.0 / math.sqrt(sqrDist);
             double invDistCubed = invDist / sqrDist;
             return offset * (sgp * invDistCubed);
+        }
+
+        private void ResolveReferenceFrameState(double time, out double3 framePos, out double3 frameVel)
+        {
+            if (ReferenceFrameIndex <= 0 || MoonCount == 0 || MoonEphemeris.Length == 0 || EphemerisTimes.Length == 0)
+            {
+                framePos = JupiterPosition;
+                frameVel = double3.zero;
+                return;
+            }
+
+            int moonIndex = math.clamp(ReferenceFrameIndex - 1, 0, MoonCount - 1);
+
+            int timesLen = EphemerisTimes.Length;
+            int idx = 0;
+            while (idx < timesLen - 2 && EphemerisTimes[idx + 1] < time) idx++;
+            while (idx > 0 && EphemerisTimes[idx] > time) idx--;
+
+            int b0 = idx * MoonCount + moonIndex;
+            int b1 = math.min(idx + 1, timesLen - 1) * MoonCount + moonIndex;
+
+            framePos = AccelerationEvaluator.HermiteInterpolate(
+                MoonEphemeris[b0].Position,
+                MoonVelocities[b0],
+                MoonEphemeris[b1].Position,
+                MoonVelocities[b1],
+                EphemerisTimes[idx],
+                EphemerisTimes[math.min(idx + 1, timesLen - 1)],
+                time);
+
+            frameVel = MoonVelocities[b0];
         }
 
         private static double3 CalculateWorldDeltaV(double3 pos, double3 vel, ManeuverNodeData node)
