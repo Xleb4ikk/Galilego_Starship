@@ -88,6 +88,11 @@ namespace Galilego.Gameplay
         private double? cachedPredictionLength;
         private List<ManeuverNodeData> cachedNodeData = new List<ManeuverNodeData>();
 
+        // Cached marker position for use during scrubbing (when fullTrajectoryPoints is cleared)
+        private Vector3d cachedMarkerPos;
+        private double cachedMarkerTime;
+        private bool hasCachedMarkerPos;
+
         // Segment-level cache: per-boundary states for partial recalculation
         private List<SegmentBoundaryState> cachedBoundaries = new List<SegmentBoundaryState>();
         private bool hasPartialCacheHit = false;
@@ -160,6 +165,8 @@ namespace Galilego.Gameplay
                 {
                     isDirty = false;
                     dirtyTimer = 0f;
+                    if (ScrubbingActive)
+                        skipClearOnNextRecalc = true;
                     RequestRecalculation();
                 }
             }
@@ -169,6 +176,20 @@ namespace Galilego.Gameplay
                 if (trajectoryJobHandle.IsCompleted)
                 {
                     CompleteJobAndSwap();
+                    // If scrubbing is still changing values, schedule next job
+                    // without clearing lines (keeps old trajectory visible)
+                    if (isDirty)
+                    {
+                        isDirty = false;
+                        dirtyTimer = 0f;
+                        skipClearOnNextRecalc = true;
+                        hasPartialCacheHit = false;
+                        fullTrajectoryPoints.Clear();
+                        fullTrajectoryTimes.Clear();
+                        fullTrajectoryIsDashed.Clear();
+                        ScheduleJobs();
+                        UpdateCache();
+                    }
                 }
             }
 
@@ -320,8 +341,9 @@ namespace Galilego.Gameplay
 
         public void MarkAsDirtyLightweight()
         {
+            if (!isDirty)
+                dirtyTimer = 0f;
             isDirty = true;
-            dirtyTimer = 0f;
         }
 
         private bool MatchesCachedInput()
@@ -376,6 +398,9 @@ namespace Galilego.Gameplay
                 cachedNodeData.Add(JobTypeConversion.ToNodeData(flightPlan.Nodes[i]));
         }
 
+        private bool skipClearOnNextRecalc;
+        public bool ScrubbingActive { get; set; }
+
         public void RequestRecalculation()
         {
             if (Time.realtimeSinceStartup < 1f)
@@ -405,7 +430,9 @@ namespace Galilego.Gameplay
             TryFindPartialRestartPoint();
 
             CompleteAndDisposeJobs();
-            ClearLines();
+            if (!skipClearOnNextRecalc)
+                ClearLines();
+            skipClearOnNextRecalc = false;
 
             if (hasPartialCacheHit)
             {
@@ -827,6 +854,13 @@ namespace Galilego.Gameplay
 
             DisposeJobResources();
             isJobRunning = false;
+            // Cache last trajectory end point for marker during scrubbing
+            hasCachedMarkerPos = fullTrajectoryPoints.Count > 0;
+            if (hasCachedMarkerPos)
+            {
+                cachedMarkerPos = fullTrajectoryPoints[fullTrajectoryPoints.Count - 1];
+                cachedMarkerTime = fullTrajectoryTimes[fullTrajectoryTimes.Count - 1];
+            }
             UpdateVisibility();
         }
 
@@ -1093,6 +1127,13 @@ namespace Galilego.Gameplay
             if (!found && fullTrajectoryPoints.Count > 0)
             {
                 pos = fullTrajectoryPoints[fullTrajectoryPoints.Count - 1];
+                found = true;
+            }
+
+            if (!found && hasCachedMarkerPos)
+            {
+                pos = cachedMarkerPos;
+                targetTime = cachedMarkerTime;
                 found = true;
             }
 

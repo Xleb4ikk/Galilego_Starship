@@ -119,7 +119,7 @@ namespace Galilego.Universe
         [SerializeField] private float moonOrbitScreenWidth = 3f;
         [SerializeField] private float moonOrbitTailAlpha = 1f;
         [SerializeField] private float moonOrbitAheadAlpha = 0.08f;
-        [SerializeField] [Range(1f, 365f)] private float moonOrbitHistoryDays = 30f;
+        [SerializeField] [Range(1f, 365f)] private float moonOrbitHistoryDays = 1f;
         [SerializeField] private Color shipTrajectoryColor = new Color(0.25f, 0.95f, 1f, 0.95f);
         [SerializeField] private Color moonOrbitColor = new Color(0.65f, 0.85f, 1f, 0.4f);
 
@@ -259,6 +259,7 @@ namespace Galilego.Universe
 
         private void Awake()
         {
+            moonOrbitHistoryDays = 1f;
             ResolveCameraReferences();
             DetachCameraRigFromShipIfNeeded();
             InitializeBodies();
