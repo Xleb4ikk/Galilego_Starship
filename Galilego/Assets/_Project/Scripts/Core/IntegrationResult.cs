@@ -1,4 +1,4 @@
-namespace Galilego.Physics
+namespace Galilego.Core
 {
     public struct IntegrationResult
     {

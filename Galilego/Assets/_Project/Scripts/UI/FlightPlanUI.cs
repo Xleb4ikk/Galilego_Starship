@@ -16,9 +16,12 @@
 using System;
 using System.Collections.Generic;
 using UnityEngine;
-using Galilego.Physics;
+using Galilego.Core;
+using Galilego.Gameplay;
+using Galilego.Simulation;
+using Galilego.Universe;
 
-namespace Galilego.Gameplay
+namespace Galilego.UI
 {
     /// <summary>
     /// Главное окно планировщика манёвров в стиле Principia.

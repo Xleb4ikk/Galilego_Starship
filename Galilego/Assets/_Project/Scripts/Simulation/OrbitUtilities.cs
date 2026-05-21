@@ -5,9 +5,9 @@
 // На основе документации Principia (Part5)
 
 using System;
-using Galilego.Physics;
+using Galilego.Core;
 
-namespace Galilego.Gameplay
+namespace Galilego.Simulation
 {
     /// <summary>
     /// Утилиты для работы с орбитами.

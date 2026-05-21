@@ -5,9 +5,9 @@
 // Интегрированы в существующую систему Galilego
 
 using System;
-using Galilego.Physics;
+using Galilego.Core;
 
-namespace Galilego.Gameplay
+namespace Galilego.Simulation
 {
     /// <summary>
     /// Параметры двигателя для манёвра.

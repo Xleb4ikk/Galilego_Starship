@@ -1,7 +1,8 @@
 using System;
 using UnityEngine;
+using Galilego.Core;
 
-namespace Galilego.Physics
+namespace Galilego.Universe
 {
     [Serializable]
     public sealed class MoonRail

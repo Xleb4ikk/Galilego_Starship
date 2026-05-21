@@ -1,8 +1,10 @@
 using System;
 using System.Collections;
 using UnityEngine;
+using Galilego.Core;
+using Galilego.Universe;
 
-namespace Galilego.Physics
+namespace Galilego.Gameplay
 {
     [RequireComponent(typeof(LineRenderer))]
     public sealed class TrajectoryPredictor : MonoBehaviour

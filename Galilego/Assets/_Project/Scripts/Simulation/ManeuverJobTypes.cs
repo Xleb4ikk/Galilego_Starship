@@ -1,7 +1,8 @@
 using System.Runtime.InteropServices;
 using Unity.Mathematics;
+using Galilego.Gameplay;
 
-namespace Galilego.Gameplay
+namespace Galilego.Simulation
 {
     [StructLayout(LayoutKind.Sequential)]
     public struct MoonOrbitData
@@ -75,14 +76,14 @@ namespace Galilego.Gameplay
 
     public static class JobTypeConversion
     {
-        public static double3 ToDouble3(in Galilego.Physics.Vector3d v)
+        public static double3 ToDouble3(in Galilego.Core.Vector3d v)
         {
             return new double3(v.X, v.Y, v.Z);
         }
 
-        public static Galilego.Physics.Vector3d ToVector3d(double3 v)
+        public static Galilego.Core.Vector3d ToVector3d(double3 v)
         {
-            return new Galilego.Physics.Vector3d(v.x, v.y, v.z);
+            return new Galilego.Core.Vector3d(v.x, v.y, v.z);
         }
 
         public static ManeuverNodeData ToNodeData(ManeuverNode node)

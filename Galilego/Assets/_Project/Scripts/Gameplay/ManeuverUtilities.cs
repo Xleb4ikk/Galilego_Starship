@@ -6,6 +6,7 @@
 
 using System;
 using System.Collections.Generic;
+using Galilego.Simulation;
 
 namespace Galilego.Gameplay
 {

@@ -1,6 +1,6 @@
 using System;
 
-namespace Galilego.Physics
+namespace Galilego.Core
 {
     public sealed class CelestialBody
     {

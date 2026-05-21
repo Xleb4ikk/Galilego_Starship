@@ -1,7 +1,7 @@
 using UnityEngine;
 using UnityEngine.UI;
 
-namespace Galilego.Physics
+namespace Galilego.UI
 {
     public sealed class CircularRawImage : RawImage
     {

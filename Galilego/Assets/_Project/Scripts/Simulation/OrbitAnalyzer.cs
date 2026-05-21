@@ -7,9 +7,10 @@
 using System;
 using System.Collections.Generic;
 using UnityEngine;
-using Galilego.Physics;
+using Galilego.Core;
+using Galilego.Universe;
 
-namespace Galilego.Gameplay
+namespace Galilego.Simulation
 {
     /// <summary>
     /// Анализатор орбит для участков свободного полёта.

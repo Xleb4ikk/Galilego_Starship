@@ -3,8 +3,9 @@ using System.Collections.Generic;
 using TMPro;
 using UnityEngine;
 using UnityEngine.UI;
+using Galilego.Universe;
 
-namespace Galilego.Physics
+namespace Galilego.UI
 {
     public sealed class ReferenceFrameSelectorUI : MonoBehaviour
     {

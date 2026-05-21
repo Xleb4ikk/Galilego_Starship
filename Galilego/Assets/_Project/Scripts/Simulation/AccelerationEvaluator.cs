@@ -1,7 +1,7 @@
 using Unity.Collections;
 using Unity.Mathematics;
 
-namespace Galilego.Gameplay
+namespace Galilego.Simulation
 {
     public static class AccelerationEvaluator
     {

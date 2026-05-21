@@ -3,7 +3,7 @@ using Unity.Collections;
 using Unity.Jobs;
 using Unity.Mathematics;
 
-namespace Galilego.Gameplay
+namespace Galilego.Simulation
 {
     [BurstCompile]
     public struct OrbitalBasisJob : IJobParallelFor

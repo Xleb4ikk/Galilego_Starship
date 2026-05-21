@@ -5,9 +5,12 @@
 
 using System;
 using UnityEngine;
-using Galilego.Physics;
+using Galilego.Core;
+using Galilego.Gameplay;
+using Galilego.Simulation;
+using Galilego.Universe;
 
-namespace Galilego.Gameplay
+namespace Galilego.UI
 {
     /// <summary>
     /// UI компонент для отображения анализа орбит.

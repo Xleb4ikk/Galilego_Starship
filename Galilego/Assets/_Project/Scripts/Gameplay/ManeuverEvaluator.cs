@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
 using UnityEngine;
-using Galilego.Physics;
+using Galilego.Core;
+using Galilego.Simulation;
+using Galilego.Universe;
 using Unity.Collections;
 using Unity.Jobs;
 using Unity.Mathematics;

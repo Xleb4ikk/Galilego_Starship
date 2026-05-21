@@ -1,6 +1,8 @@
 using UnityEngine;
 
-public class Orbit : MonoBehaviour
+namespace Galilego.MainMenu
+{
+    public class Orbit : MonoBehaviour
 {
     public Transform center; // :contentReference[oaicite:1]{index=1}
 
@@ -69,4 +71,5 @@ public class Orbit : MonoBehaviour
     public void SetFast() => mode = TimeMode.Fast;
     public void SetReal() => mode = TimeMode.Real;
     public void SetUltraReal() => mode = TimeMode.UltraReal;
+}
 }

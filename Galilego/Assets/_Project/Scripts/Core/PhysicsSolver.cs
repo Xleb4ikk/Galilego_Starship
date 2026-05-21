@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 
-namespace Galilego.Physics
+namespace Galilego.Core
 {
     public static class PhysicsSolver
     {

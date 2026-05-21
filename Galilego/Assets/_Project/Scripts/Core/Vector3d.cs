@@ -1,7 +1,7 @@
 using System;
 using UnityEngine;
 
-namespace Galilego.Physics
+namespace Galilego.Core
 {
 [Serializable]
     public struct Vector3d

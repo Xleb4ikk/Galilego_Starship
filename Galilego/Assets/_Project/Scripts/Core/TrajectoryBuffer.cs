@@ -1,7 +1,7 @@
 using System;
 using UnityEngine;
 
-namespace Galilego.Physics
+namespace Galilego.Core
 {
     /// <summary>
     /// Immutable trajectory buffer for deterministic rendering.

@@ -1,6 +1,8 @@
 using UnityEngine;
 
-public class ShipMarker : MonoBehaviour
+namespace Galilego.Ship
+{
+    public class ShipMarker : MonoBehaviour
 {
     private LineRenderer bodyLine;
     private LineRenderer panelLine;
@@ -79,4 +81,5 @@ public class ShipMarker : MonoBehaviour
         lr.textureMode = LineTextureMode.Stretch;
         lr.sharedMaterial = material;
     }
+}
 }

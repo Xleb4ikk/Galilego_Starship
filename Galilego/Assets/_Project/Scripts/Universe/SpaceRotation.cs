@@ -1,7 +1,9 @@
 using UnityEngine;
 using UnityEngine.InputSystem;
 
-public class SpaceRotation : MonoBehaviour
+namespace Galilego.Universe
+{
+    public class SpaceRotation : MonoBehaviour
 {
     [Header("Сила вращения")]
     public float rotationForce = 150f;
@@ -106,4 +108,5 @@ public class SpaceRotation : MonoBehaviour
     {
         _angularVelocity = Vector3.zero;
     }
+}
 }

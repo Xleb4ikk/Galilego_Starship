@@ -1,7 +1,7 @@
 using System;
 using UnityEngine;
 
-namespace Galilego.Physics
+namespace Galilego.Core
 {
     /// <summary>
     /// Canonical orbital basis computation.

@@ -3,9 +3,12 @@ using System.Collections.Generic; // На всякий случай для сп�
 using TMPro;
 using UnityEngine;
 using UnityEngine.UI;
+using Galilego.Core;
+using Galilego.Gameplay;
+using Galilego.Ship;
+using Galilego.Universe;
 
-
-namespace Galilego.Physics
+namespace Galilego.UI
 {
     public sealed class NavballUI : MonoBehaviour
     {

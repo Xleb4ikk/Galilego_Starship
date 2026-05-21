@@ -1,5 +1,5 @@
-// Добавляем using Galilego.Physics, так как Vector3d и PhysicsSolver находятся там
-using Galilego.Physics;
+using Galilego.Core;
+using Galilego.Simulation;
 using System;
 using System.Collections.Generic;
 using UnityEngine;

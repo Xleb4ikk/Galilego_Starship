@@ -2,10 +2,13 @@ using System;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.InputSystem;
+using Galilego.Core;
 using Galilego.Gameplay;
+using Galilego.Ship;
+using Galilego.Simulation;
 using UnityEngine.SceneManagement;
 
-namespace Galilego.Physics
+namespace Galilego.Universe
 {
     public enum ReferenceFrameTarget
     {
@@ -3807,7 +3810,7 @@ namespace Galilego.Physics
 
         public AstrodynamicPlaneMapping CurrentPlaneMapping => astrodynamicPlaneMapping;
 
-        public int FillMoonOrbitData(Gameplay.MoonOrbitData[] output, int offset, int count, double snapshotTime)
+        public int FillMoonOrbitData(MoonOrbitData[] output, int offset, int count, double snapshotTime)
         {
             if (moonRails == null || output == null) return 0;
             int maxCount = Math.Min(count, moonRails.Count - offset);
@@ -3820,7 +3823,7 @@ namespace Galilego.Physics
                 double ecc = Math.Max(0.0, Math.Min(rail.ResolveEccentricity(), 0.999));
                 double combinedMu = jupiterStandardGravitationalParameter + rail.ResolveStandardGravitationalParameter();
 
-                output[i] = new Gameplay.MoonOrbitData
+                output[i] = new MoonOrbitData
                 {
                     SemiMajorAxis = sma,
                     Eccentricity = ecc,

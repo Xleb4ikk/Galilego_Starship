@@ -1,6 +1,6 @@
 using System.Collections.Generic;
 
-namespace Galilego.Physics
+namespace Galilego.Universe
 {
     public static class GalileanMoonPresets
     {

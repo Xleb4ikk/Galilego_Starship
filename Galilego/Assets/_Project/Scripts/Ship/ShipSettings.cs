@@ -1,7 +1,8 @@
 using System;
 using UnityEngine;
+using Galilego.Core;
 
-namespace Galilego.Physics
+namespace Galilego.Ship
 {
     [Serializable]
     public sealed class ShipSettings

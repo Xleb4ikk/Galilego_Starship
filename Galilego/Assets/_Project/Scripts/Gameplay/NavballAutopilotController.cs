@@ -1,6 +1,9 @@
 using UnityEngine;
+using Galilego.Core;
+using Galilego.UI;
+using Galilego.Universe;
 
-namespace Galilego.Physics
+namespace Galilego.Gameplay
 {
     public sealed class NavballAutopilotController : MonoBehaviour
     {

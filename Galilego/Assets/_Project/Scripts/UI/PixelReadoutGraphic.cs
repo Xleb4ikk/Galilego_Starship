@@ -1,6 +1,6 @@
 using UnityEngine.UI;
 
-namespace Galilego.Physics
+namespace Galilego.UI
 {
     public sealed partial class PixelReadoutGraphic : MaskableGraphic
     {
