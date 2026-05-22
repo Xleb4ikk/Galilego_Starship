@@ -92,15 +92,19 @@ namespace Galilego.Simulation
                 return OrbitAnalysisResult.Invalid;
             }
             
-            // Вычисляем относительные координаты
+            // Вычисляем относительные координаты (в симуляционной системе)
             Vector3d relativePos = currentPosition - framePosition;
             Vector3d relativeVel = currentVelocity - frameVelocity;
             
             // Применяем манёвр
             Vector3d newVelocity = relativeVel + deltaV;
             
-            // Вычисляем новые элементы орбиты
-            OrbitalElements elements = OrbitalElements.FromState(relativePos, newVelocity, mu);
+            // 🔴 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Преобразуем в астродинамическую систему (Z-up)
+            // перед вызовом OrbitalElements.FromState, который ожидает Z-up контракт
+            OrbitalElements elements = OrbitalElements.FromState(
+                universeManager.ConvertSimulationToAstrodynamicFrame(relativePos),
+                universeManager.ConvertSimulationToAstrodynamicFrame(newVelocity),
+                mu);
             
             if (!elements.IsValid)
                 return OrbitAnalysisResult.Invalid;

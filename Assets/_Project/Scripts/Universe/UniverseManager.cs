@@ -545,6 +545,9 @@ namespace Galilego.Universe
 
             if (changed)
             {
+                // 🔴 ФАЗА 2.1: Валидация SOI при смене системы координат
+                ValidateSphereOfInfluence(target);
+                
                 NotifyReferenceFrameStateChanged();
             }
         }
@@ -1374,6 +1377,58 @@ namespace Galilego.Universe
             lastActiveReferenceFrame = activeFrame;
             RebuildReferenceFrameVisuals();
             ActiveReferenceFrameChanged?.Invoke(activeFrame);
+        }
+
+        /// <summary>
+        /// Валидация сферы влияния при смене системы координат.
+        /// Проверяет, находится ли корабль внутри SOI выбранного тела.
+        /// Если корабль вне SOI, выводит предупреждение в лог.
+        /// </summary>
+        private void ValidateSphereOfInfluence(ReferenceFrameTarget target)
+        {
+            // Пропускаем валидацию для Юпитера (SOI = бесконечность)
+            if (target == ReferenceFrameTarget.Jupiter)
+                return;
+
+            // Получаем параметры выбранного тела
+            if (!TryGetReferenceState(
+                target,
+                out string frameName,
+                out Vector3d framePosition,
+                out Vector3d frameVelocity,
+                out double mu,
+                out double bodyRadius,
+                out double soi))
+            {
+                Debug.LogWarning($"UniverseManager: Cannot validate SOI for {target} - reference state unavailable");
+                return;
+            }
+
+            // Проверяем инициализацию корабля
+            if (shipBody == null)
+            {
+                // Корабль ещё не инициализирован (вызов из Awake), пропускаем валидацию
+                return;
+            }
+
+            // Вычисляем расстояние от корабля до тела
+            Vector3d relativePosition = shipBody.Position - framePosition;
+            double distance = relativePosition.Magnitude;
+
+            // Проверяем, находится ли корабль внутри SOI
+            if (distance > soi)
+            {
+                double distanceKm = distance / 1000.0;
+                double soiKm = soi / 1000.0;
+                double excessKm = (distance - soi) / 1000.0;
+
+                Debug.LogWarning(
+                    $"UniverseManager: Ship is OUTSIDE sphere of influence of {frameName}!\n" +
+                    $"  Distance: {distanceKm:F1} km\n" +
+                    $"  SOI radius: {soiKm:F1} km\n" +
+                    $"  Excess: {excessKm:F1} km\n" +
+                    $"Orbital calculations relative to {frameName} may be inaccurate.");
+            }
         }
 
         private void NotifyReferenceFrameStateChanged()
@@ -2966,7 +3021,12 @@ namespace Galilego.Universe
             }
         }
 
-        private Vector3d ConvertAstrodynamicToSimulationFrame(Vector3d vector)
+        /// <summary>
+        /// Преобразует вектор из астродинамической системы координат (Z-up) в симуляционную.
+        /// </summary>
+        /// <param name="vector">Вектор в астродинамической системе (Z всегда указывает на север)</param>
+        /// <returns>Вектор в симуляционной системе (Y-up или Z-up в зависимости от настроек)</returns>
+        public Vector3d ConvertAstrodynamicToSimulationFrame(Vector3d vector)
         {
             switch (astrodynamicPlaneMapping)
             {
@@ -2978,7 +3038,12 @@ namespace Galilego.Universe
             }
         }
 
-        private Vector3d ConvertSimulationToAstrodynamicFrame(Vector3d vector)
+        /// <summary>
+        /// Преобразует вектор из симуляционной системы координат в астродинамическую (Z-up).
+        /// </summary>
+        /// <param name="vector">Вектор в симуляционной системе (Y-up или Z-up в зависимости от настроек)</param>
+        /// <returns>Вектор в астродинамической системе (Z всегда указывает на север)</returns>
+        public Vector3d ConvertSimulationToAstrodynamicFrame(Vector3d vector)
         {
             switch (astrodynamicPlaneMapping)
             {
