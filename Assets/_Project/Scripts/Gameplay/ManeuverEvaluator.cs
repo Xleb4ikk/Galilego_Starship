@@ -79,6 +79,7 @@ namespace Galilego.Gameplay
 
         private JobHandle ephemerisJobHandle;
         private JobHandle trajectoryJobHandle;
+        private JobHandle ballisticJobHandle;
         private bool isJobRunning = false;
 
         // Cache to skip recalculation when inputs haven't changed
@@ -168,6 +169,7 @@ namespace Galilego.Gameplay
         private void OnDestroy()
         {
             CompleteAndDisposeJobs();
+            DisposeAllNativeBuffers();
             ClearLines();
             ClearMoonPredictionVisuals();
         }
@@ -561,6 +563,15 @@ namespace Galilego.Gameplay
             }
         }
 
+        private NativeArray<T> ResizeBuffer<T>(NativeArray<T> existing, int requiredSize) where T : unmanaged
+        {
+            if (existing.IsCreated && existing.Length >= requiredSize)
+                return existing;
+            if (existing.IsCreated)
+                existing.Dispose();
+            return new NativeArray<T>(requiredSize, Allocator.Persistent);
+        }
+
         private void ScheduleJobs()
         {
             flightPlan.Nodes.Sort((a, b) => a.StartTime.CompareTo(b.StartTime));
@@ -633,30 +644,34 @@ namespace Galilego.Gameplay
             int ephemerisSampleCount = Math.Max(2, (int)(predictionSpan / ephemerisStep) + 1);
             ephemerisSampleCount = Math.Min(ephemerisSampleCount, 50000);
 
-            nativeEphemerisTimes = new NativeArray<double>(ephemerisSampleCount, Allocator.Persistent);
+            nativeEphemerisTimes = ResizeBuffer(nativeEphemerisTimes, ephemerisSampleCount);
             for (int i = 0; i < ephemerisSampleCount; i++)
                 nativeEphemerisTimes[i] = baseStartTime + i * ephemerisStep;
             nativeEphemerisTimes[ephemerisSampleCount - 1] = endTime;
 
-            nativeEphemerisResults = new NativeArray<BodyState>(
-                ephemerisSampleCount * moonCount, Allocator.Persistent);
-            nativeEphemerisVelocities = new NativeArray<double3>(
-                ephemerisSampleCount * moonCount, Allocator.Persistent);
+            int flatEphemerisCount = ephemerisSampleCount * moonCount;
+            nativeEphemerisResults = ResizeBuffer(nativeEphemerisResults, flatEphemerisCount);
+            nativeEphemerisVelocities = ResizeBuffer(nativeEphemerisVelocities, flatEphemerisCount);
 
-            nativeTrajectoryOutput = new NativeArray<TrajectoryPoint>(
-                adjustedMaxPoints, Allocator.Persistent);
-            nativeBallisticOutput = new NativeArray<TrajectoryPoint>(
-                adjustedMaxPoints, Allocator.Persistent);
-            nativePointCount = new NativeReference<int>(0, Allocator.Persistent);
-            nativeBallisticPointCount = new NativeReference<int>(0, Allocator.Persistent);
-            nativeBoundaries = new NativeArray<SegmentBoundaryState>(
-                nodeCount + 2, Allocator.Persistent);
-            nativeBoundaryCount = new NativeReference<int>(0, Allocator.Persistent);
-            nativeCalcStatus = new NativeReference<int>(0, Allocator.Persistent);
-            nativeBallisticCalcStatus = new NativeReference<int>(0, Allocator.Persistent);
+            nativeTrajectoryOutput = ResizeBuffer(nativeTrajectoryOutput, adjustedMaxPoints);
+            nativeBallisticOutput = ResizeBuffer(nativeBallisticOutput, adjustedMaxPoints);
+            if (!nativePointCount.IsCreated) nativePointCount = new NativeReference<int>(0, Allocator.Persistent);
+            if (!nativeBallisticPointCount.IsCreated) nativeBallisticPointCount = new NativeReference<int>(0, Allocator.Persistent);
+            nativeBoundaries = ResizeBuffer(nativeBoundaries, nodeCount + 2);
+            if (!nativeBoundaryCount.IsCreated) nativeBoundaryCount = new NativeReference<int>(0, Allocator.Persistent);
+            if (!nativeCalcStatus.IsCreated) nativeCalcStatus = new NativeReference<int>(0, Allocator.Persistent);
+            if (!nativeBallisticCalcStatus.IsCreated) nativeBallisticCalcStatus = new NativeReference<int>(0, Allocator.Persistent);
 
-            nativeBallisticBoundaries = new NativeArray<SegmentBoundaryState>(1, Allocator.Persistent);
-            nativeBallisticBoundaryCount = new NativeReference<int>(0, Allocator.Persistent);
+            nativeBallisticBoundaries = ResizeBuffer(nativeBallisticBoundaries, 1);
+            if (!nativeBallisticBoundaryCount.IsCreated) nativeBallisticBoundaryCount = new NativeReference<int>(0, Allocator.Persistent);
+
+            // Reset output refs before scheduling (clean slate for reuse)
+            nativePointCount.Value = 0;
+            nativeBallisticPointCount.Value = 0;
+            nativeBoundaryCount.Value = 0;
+            nativeBallisticBoundaryCount.Value = 0;
+            nativeCalcStatus.Value = 0;
+            nativeBallisticCalcStatus.Value = 0;
 
             if (moonCount > 0)
             {
@@ -668,7 +683,7 @@ namespace Galilego.Gameplay
                     JupiterPosition = jupiterPos,
                     PlaneMapping = planeMapping
                 };
-                ephemerisJobHandle = moonJob.Schedule(ephemerisSampleCount, 64);
+                ephemerisJobHandle = moonJob.Schedule(flatEphemerisCount, 64);
 
                 var velJob = new EphemerisVelocityJob
                 {
@@ -677,7 +692,7 @@ namespace Galilego.Gameplay
                     Velocities = nativeEphemerisVelocities,
                     MoonCount = moonCount
                 };
-                ephemerisJobHandle = velJob.Schedule(ephemerisSampleCount, 64, ephemerisJobHandle);
+                ephemerisJobHandle = velJob.Schedule(flatEphemerisCount, 64, ephemerisJobHandle);
             }
             else
             {
@@ -720,7 +735,7 @@ namespace Galilego.Gameplay
                 SegmentBoundaryCount = nativeBallisticBoundaryCount
             };
 
-            var ballisticHandle = ballisticTrajectoryJob.Schedule(ephemerisJobHandle);
+            ballisticJobHandle = ballisticTrajectoryJob.Schedule(ephemerisJobHandle);
 
             var trajectoryJob = new FullTrajectoryJob
             {
@@ -758,7 +773,8 @@ namespace Galilego.Gameplay
                 SegmentBoundaryCount = nativeBoundaryCount
             };
 
-            trajectoryJobHandle = trajectoryJob.Schedule(ballisticHandle);
+            var maneuverHandle = trajectoryJob.Schedule(ephemerisJobHandle);
+            trajectoryJobHandle = JobHandle.CombineDependencies(ballisticJobHandle, maneuverHandle);
             JobHandle.ScheduleBatchedJobs();
             isJobRunning = true;
 
@@ -893,6 +909,20 @@ namespace Galilego.Gameplay
         }
 
         private void DisposeJobResources()
+        {
+            // Dispose small/frequently-changing arrays; keep large buffers for reuse
+            if (nativeMoonOrbits.IsCreated) nativeMoonOrbits.Dispose();
+            if (nativeNodeData.IsCreated) nativeNodeData.Dispose();
+            if (nativeBallisticNodeData.IsCreated) nativeBallisticNodeData.Dispose();
+            // These large buffers persist across frames — only recreate when size grows
+            // nativeEphemerisTimes, nativeEphemerisResults, nativeEphemerisVelocities,
+            // nativeTrajectoryOutput, nativeBallisticOutput, nativeBoundaries,
+            // nativeBallisticBoundaries, nativePointCount, nativeBallisticPointCount,
+            // nativeBoundaryCount, nativeCalcStatus, nativeBallisticCalcStatus,
+            // nativeBallisticBoundaryCount are reused
+        }
+
+        private void DisposeAllNativeBuffers()
         {
             if (nativeMoonOrbits.IsCreated) nativeMoonOrbits.Dispose();
             if (nativeNodeData.IsCreated) nativeNodeData.Dispose();

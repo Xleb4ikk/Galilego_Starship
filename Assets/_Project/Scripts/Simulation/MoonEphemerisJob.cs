@@ -14,23 +14,22 @@ namespace Galilego.Simulation
         public double3 JupiterPosition;
         public int PlaneMapping;
 
-        public void Execute(int timeIndex)
+        public void Execute(int index)
         {
+            int moonCount = MoonOrbits.Length;
+            int timeIndex = index / moonCount;
+            int moonIndex = index % moonCount;
+
             double t = SampleTimes[timeIndex];
-            int baseIdx = timeIndex * MoonOrbits.Length;
+            var orbit = MoonOrbits[moonIndex];
+            double3 relPos = AccelerationEvaluator.EvaluateMoonPosition(
+                ref orbit, t, PlaneMapping);
 
-            for (int m = 0; m < MoonOrbits.Length; m++)
+            Results[index] = new BodyState
             {
-                var orbit = MoonOrbits[m];
-                double3 relPos = AccelerationEvaluator.EvaluateMoonPosition(
-                    ref orbit, t, PlaneMapping);
-
-                Results[baseIdx + m] = new BodyState
-                {
-                    Position = JupiterPosition + relPos,
-                    StandardGravitationalParameter = orbit.StandardGravitationalParameter
-                };
-            }
+                Position = JupiterPosition + relPos,
+                StandardGravitationalParameter = orbit.StandardGravitationalParameter
+            };
         }
     }
 
@@ -42,29 +41,26 @@ namespace Galilego.Simulation
         [NativeDisableParallelForRestriction] public NativeArray<double3> Velocities;
         public int MoonCount;
 
-        public void Execute(int timeIndex)
+        public void Execute(int index)
         {
-            int baseIdx = timeIndex * MoonCount;
-            int prevIdx = math.max(0, timeIndex - 1) * MoonCount;
-            int nextIdx = math.min(SampleTimes.Length - 1, timeIndex + 1) * MoonCount;
+            int moonCount = MoonCount;
+            int timeIndex = index / moonCount;
+            int moonIndex = index % moonCount;
 
-            for (int m = 0; m < MoonCount; m++)
+            int prevIdx = math.max(0, timeIndex - 1) * moonCount + moonIndex;
+            int nextIdx = math.min(SampleTimes.Length - 1, timeIndex + 1) * moonCount + moonIndex;
+
+            if (timeIndex == 0 || timeIndex == SampleTimes.Length - 1)
             {
-                int prevMoon = prevIdx + m;
-                int nextMoon = nextIdx + m;
-
-                if (timeIndex == 0 || timeIndex == SampleTimes.Length - 1)
-                {
-                    Velocities[baseIdx + m] = double3.zero;
-                }
-                else
-                {
-                    Velocities[baseIdx + m] = AccelerationEvaluator.ComputeCentralVelocity(
-                        MoonStates[prevMoon].Position,
-                        MoonStates[nextMoon].Position,
-                        SampleTimes[timeIndex - 1],
-                        SampleTimes[timeIndex + 1]);
-                }
+                Velocities[index] = double3.zero;
+            }
+            else
+            {
+                Velocities[index] = AccelerationEvaluator.ComputeCentralVelocity(
+                    MoonStates[prevIdx].Position,
+                    MoonStates[nextIdx].Position,
+                    SampleTimes[timeIndex - 1],
+                    SampleTimes[timeIndex + 1]);
             }
         }
     }

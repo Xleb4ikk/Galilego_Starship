@@ -7,6 +7,9 @@ using Galilego.Gameplay;
 using Galilego.Ship;
 using Galilego.Simulation;
 using UnityEngine.SceneManagement;
+using Unity.Collections;
+using Unity.Jobs;
+using Unity.Mathematics;
 
 namespace Galilego.Universe
 {
@@ -136,6 +139,12 @@ namespace Galilego.Universe
 
         private readonly List<CelestialBody> moonBodies = new List<CelestialBody>();
         private readonly List<LineRenderer> moonOrbitRenderers = new List<LineRenderer>();
+
+        // Orbit line job buffers (persistent, reused across frames)
+        private NativeArray<float3>[] moonOrbitPointBuffers;
+        private int[] moonOrbitBufferSizes;
+        private NativeArray<float3> jupiterOrbitPointBuffer;
+        private int jupiterOrbitBufferSize;
 
         private CelestialBody jupiterBody;
         private CelestialBody shipBody;
@@ -3268,8 +3277,6 @@ namespace Galilego.Universe
             }
 
             ReferenceFrameTarget activeFrame = ResolveActiveReferenceFrameTarget();
-            // ИСПРАВЛЕНИЕ: Луны всегда рисуются на текущее время симуляции,
-            // previewTimeOffsetSeconds влияет только на траекторию манёвра в ManeuverEvaluator
             double orbitTime = simulationTimeSeconds;
             if (!TryGetReferenceStateAtTime(
                 activeFrame,
@@ -3287,14 +3294,110 @@ namespace Galilego.Universe
             ApplyVisualPosition(moonOrbitRoot, currentFramePosition);
 
             int sampleCount = Math.Max(16, moonOrbitSamples);
-            RebuildJupiterOrbitLine(activeFrame, sampleCount, orbitTime, currentFramePosition);
+            double historySeconds = moonOrbitHistoryDays * 86400d;
+            float scaleFactor = (float)(1.0 / GetMetersPerVisualUnit());
+            double3 jupiterPos = JobTypeConversion.ToDouble3(jupiterRealPosition);
+            double3 framePos = JobTypeConversion.ToDouble3(currentFramePosition);
+            int planeMapping = CurrentPlaneMapping == AstrodynamicPlaneMapping.UnityXyPlaneZUp ? 0 : 1;
 
-            for (int railIndex = 0; railIndex < moonRails.Count; railIndex++)
+            // Ensure buffer arrays match moon count
+            int moonCount = moonRails.Count;
+            if (moonOrbitPointBuffers == null || moonOrbitPointBuffers.Length != moonCount)
+            {
+                if (moonOrbitPointBuffers != null)
+                {
+                    for (int i = 0; i < moonOrbitPointBuffers.Length; i++)
+                        if (moonOrbitPointBuffers[i].IsCreated)
+                            moonOrbitPointBuffers[i].Dispose();
+                }
+                moonOrbitPointBuffers = new NativeArray<float3>[moonCount];
+                moonOrbitBufferSizes = new int[moonCount];
+            }
+
+            // Schedule moon orbit line jobs (+1 slot for Jupiter if needed)
+            NativeArray<JobHandle> orbitHandles = new NativeArray<JobHandle>(moonCount + 1, Allocator.Temp);
+            int jobCount = 0;
+            var moonOrbitDataCache = new MoonOrbitData(); // reused for conversion
+
+            for (int railIndex = 0; railIndex < moonCount; railIndex++)
             {
                 if (railIndex >= moonOrbitRenderers.Count || moonOrbitRenderers[railIndex] == null)
-                {
                     continue;
+
+                MoonRail rail = moonRails[railIndex];
+                ReferenceFrameTarget orbitTarget = ResolveRailReferenceFrameTarget(railIndex);
+                bool isFocusedOrbit = orbitTarget == orbitMapFocusTarget && orbitMapFocusTarget != ReferenceFrameTarget.Jupiter;
+                bool shouldRender = orbitTarget != activeFrame || isFocusedOrbit;
+
+                if (!shouldRender)
+                    continue;
+
+                double orbitalPeriod = ResolveOrbitPeriodSeconds(rail);
+                double orbitCount = orbitalPeriod > 0d ? historySeconds / orbitalPeriod : 1d;
+                int effectiveSamples = orbitalPeriod > 0d
+                    ? Math.Max(16, (int)Math.Round(sampleCount * historySeconds / orbitalPeriod))
+                    : sampleCount;
+
+                // Ensure buffer size
+                if (!moonOrbitPointBuffers[railIndex].IsCreated || moonOrbitPointBuffers[railIndex].Length < effectiveSamples)
+                {
+                    if (moonOrbitPointBuffers[railIndex].IsCreated)
+                        moonOrbitPointBuffers[railIndex].Dispose();
+                    moonOrbitPointBuffers[railIndex] = new NativeArray<float3>(effectiveSamples, Allocator.Persistent);
                 }
+                moonOrbitBufferSizes[railIndex] = effectiveSamples;
+
+                // Convert MoonRail to MoonOrbitData
+                double sma = Math.Max(rail.ResolveSemiMajorAxis(), 1.0);
+                double ecc = Math.Max(0.0, Math.Min(rail.ResolveEccentricity(), 0.999));
+                double combinedMu = jupiterStandardGravitationalParameter + rail.ResolveStandardGravitationalParameter();
+                moonOrbitDataCache = new MoonOrbitData
+                {
+                    SemiMajorAxis = sma,
+                    Eccentricity = ecc,
+                    InclinationRad = rail.InclinationDegrees * (Math.PI / 180.0),
+                    AscendingNodeRad = rail.LongitudeOfAscendingNodeDegrees * (Math.PI / 180.0),
+                    PeriapsisArgRad = rail.ArgumentOfPeriapsisDegrees * (Math.PI / 180.0),
+                    MeanAnomalyAtEpochRad = rail.MeanAnomalyAtEpochDegrees * (Math.PI / 180.0),
+                    EpochTimeSeconds = rail.EpochTimeSeconds,
+                    GravitationalParameter = combinedMu,
+                    StandardGravitationalParameter = rail.ResolveStandardGravitationalParameter()
+                };
+
+                var moonJob = new MoonOrbitLineJob
+                {
+                    Orbit = moonOrbitDataCache,
+                    StartTime = orbitTime,
+                    HistorySeconds = historySeconds,
+                    EffectiveSamples = effectiveSamples,
+                    JupiterPosition = jupiterPos,
+                    FramePosition = framePos,
+                    PlaneMapping = planeMapping,
+                    ScaleFactor = scaleFactor,
+                    Results = moonOrbitPointBuffers[railIndex]
+                };
+                orbitHandles[jobCount++] = moonJob.Schedule();
+            }
+
+            // Handle Jupiter orbit line (shows Jupiter relative to active moon frame over time)
+            RebuildJupiterOrbitLineJob(activeFrame, sampleCount, orbitTime, currentFramePosition,
+                historySeconds, scaleFactor, jupiterPos, planeMapping, ref orbitHandles, ref jobCount);
+
+            // Complete all orbit jobs
+            if (jobCount > 0)
+            {
+                var subArray = new NativeArray<JobHandle>(orbitHandles.GetSubArray(0, jobCount), Allocator.Temp);
+                var combinedHandle = JobHandle.CombineDependencies(subArray);
+                combinedHandle.Complete();
+                subArray.Dispose();
+            }
+            orbitHandles.Dispose();
+
+            // Copy results to LineRenderers (main thread only)
+            for (int railIndex = 0; railIndex < moonCount; railIndex++)
+            {
+                if (railIndex >= moonOrbitRenderers.Count || moonOrbitRenderers[railIndex] == null)
+                    continue;
 
                 MoonRail rail = moonRails[railIndex];
                 LineRenderer orbitRenderer = moonOrbitRenderers[railIndex];
@@ -3306,7 +3409,7 @@ namespace Galilego.Universe
                 orbitRenderer.gameObject.layer = ResolveMoonOrbitLayer(rail);
                 orbitRenderer.gameObject.SetActive(shouldRender);
 
-                if (!shouldRender)
+                if (!shouldRender || !moonOrbitPointBuffers[railIndex].IsCreated)
                 {
                     orbitRenderer.positionCount = 0;
                     continue;
@@ -3316,26 +3419,118 @@ namespace Galilego.Universe
                 ConfigureMoonOrbitRenderer(orbitRenderer, false, moonColor);
 
                 double orbitalPeriod = ResolveOrbitPeriodSeconds(rail);
-                double historySeconds = moonOrbitHistoryDays * 86400d;
                 double orbitCount = orbitalPeriod > 0d ? historySeconds / orbitalPeriod : 1d;
-                int effectiveSamples = orbitalPeriod > 0d
-                    ? Math.Max(16, (int)Math.Round(sampleCount * historySeconds / orbitalPeriod))
-                    : sampleCount;
-                int lastIndex = effectiveSamples - 1;
+                int effectiveSamples = moonOrbitBufferSizes[railIndex];
 
                 orbitRenderer.colorGradient = BuildMoonOrbitFadeGradient(moonColor, 1f, (float)orbitCount);
                 orbitRenderer.positionCount = effectiveSamples;
+
+                var buffer = moonOrbitPointBuffers[railIndex];
                 for (int sampleIndex = 0; sampleIndex < effectiveSamples; sampleIndex++)
                 {
-                    double t = effectiveSamples <= 1 ? 0d : (double)sampleIndex / lastIndex;
-                    double sampleTime = sampleIndex == lastIndex
-                        ? orbitTime
-                        : orbitTime - historySeconds + t * historySeconds;
-                    EvaluateMoonState(rail, sampleTime, out Vector3d moonPosition, out _);
-
-                    orbitRenderer.SetPosition(sampleIndex, ToUnityOffset(moonPosition - currentFramePosition));
+                    float3 pos = buffer[sampleIndex];
+                    orbitRenderer.SetPosition(sampleIndex, new Vector3(pos.x, pos.y, pos.z));
                 }
             }
+
+            // Copy Jupiter orbit line positions from job result
+            if (jupiterOrbitPointBuffer.IsCreated && jupiterOrbitBufferSize > 0 && jupiterOrbitRenderer != null)
+            {
+                jupiterOrbitRenderer.positionCount = jupiterOrbitBufferSize;
+                for (int i = 0; i < jupiterOrbitBufferSize; i++)
+                {
+                    float3 pos = jupiterOrbitPointBuffer[i];
+                    jupiterOrbitRenderer.SetPosition(i, new Vector3(pos.x, pos.y, pos.z));
+                }
+            }
+        }
+
+        private void RebuildJupiterOrbitLineJob(
+            ReferenceFrameTarget activeFrame,
+            int sampleCount,
+            double orbitTime,
+            Vector3d currentFramePosition,
+            double historySeconds,
+            float scaleFactor,
+            double3 jupiterPos,
+            int planeMapping,
+            ref NativeArray<JobHandle> handles,
+            ref int handleCount)
+        {
+            if (jupiterOrbitRenderer == null) return;
+
+            MoonRail activeRail = null;
+            bool shouldRender = activeFrame != ReferenceFrameTarget.Jupiter && TryGetMoonRail(activeFrame, out activeRail);
+            jupiterOrbitRenderer.gameObject.SetActive(shouldRender);
+
+            if (!shouldRender)
+            {
+                jupiterOrbitRenderer.positionCount = 0;
+                jupiterOrbitBufferSize = 0;
+                return;
+            }
+
+            ConfigureMoonOrbitRenderer(jupiterOrbitRenderer, false, ResolveMoonOrbitColor(-1));
+            double orbitalPeriod = ResolveOrbitPeriodSeconds(activeRail);
+            double orbitCount = orbitalPeriod > 0d ? historySeconds / orbitalPeriod : 1d;
+            int effectiveSamples = orbitalPeriod > 0d
+                ? Math.Max(16, (int)Math.Round(sampleCount * historySeconds / orbitalPeriod))
+                : sampleCount;
+
+            // Ensure buffer size
+            if (!jupiterOrbitPointBuffer.IsCreated || jupiterOrbitPointBuffer.Length < effectiveSamples)
+            {
+                if (jupiterOrbitPointBuffer.IsCreated)
+                    jupiterOrbitPointBuffer.Dispose();
+                jupiterOrbitPointBuffer = new NativeArray<float3>(effectiveSamples, Allocator.Persistent);
+            }
+            jupiterOrbitBufferSize = effectiveSamples;
+
+            // Convert active moon rail to orbit data
+            double sma = Math.Max(activeRail.ResolveSemiMajorAxis(), 1.0);
+            double ecc = Math.Max(0.0, Math.Min(activeRail.ResolveEccentricity(), 0.999));
+            double combinedMu = jupiterStandardGravitationalParameter + activeRail.ResolveStandardGravitationalParameter();
+            var moonOrbitData = new MoonOrbitData
+            {
+                SemiMajorAxis = sma,
+                Eccentricity = ecc,
+                InclinationRad = activeRail.InclinationDegrees * (Math.PI / 180.0),
+                AscendingNodeRad = activeRail.LongitudeOfAscendingNodeDegrees * (Math.PI / 180.0),
+                PeriapsisArgRad = activeRail.ArgumentOfPeriapsisDegrees * (Math.PI / 180.0),
+                MeanAnomalyAtEpochRad = activeRail.MeanAnomalyAtEpochDegrees * (Math.PI / 180.0),
+                EpochTimeSeconds = activeRail.EpochTimeSeconds,
+                GravitationalParameter = combinedMu,
+                StandardGravitationalParameter = activeRail.ResolveStandardGravitationalParameter()
+            };
+
+            var jupiterJob = new JupiterOrbitLineJob
+            {
+                ActiveMoonOrbit = moonOrbitData,
+                StartTime = orbitTime,
+                HistorySeconds = historySeconds,
+                EffectiveSamples = effectiveSamples,
+                JupiterPosition = jupiterPos,
+                PlaneMapping = planeMapping,
+                ScaleFactor = scaleFactor,
+                Results = jupiterOrbitPointBuffer
+            };
+
+            // Resize handles array if needed
+            if (handleCount >= handles.Length)
+            {
+                var expanded = new NativeArray<JobHandle>(handleCount + 1, Allocator.Temp);
+                NativeArray<JobHandle>.Copy(handles, expanded, handleCount);
+                handles.Dispose();
+                handles = expanded;
+            }
+
+            handles[handleCount++] = jupiterJob.Schedule();
+
+            jupiterOrbitRenderer.colorGradient = BuildMoonOrbitFadeGradient(ResolveMoonOrbitColor(-1), 1f, (float)orbitCount);
+            jupiterOrbitRenderer.positionCount = effectiveSamples;
+
+            // Results will be copied after job completion in RebuildMoonOrbitLines
+            // (handled by the combinedHandle.Complete + copy loop in the caller)
         }
 
         private void EnsureJupiterOrbitVisualizer()
@@ -3846,6 +4041,21 @@ namespace Galilego.Universe
                 };
             }
             return maxCount;
+        }
+
+        private void OnDestroy()
+        {
+            // Dispose persistent orbit line buffers
+            if (moonOrbitPointBuffers != null)
+            {
+                for (int i = 0; i < moonOrbitPointBuffers.Length; i++)
+                {
+                    if (moonOrbitPointBuffers[i].IsCreated)
+                        moonOrbitPointBuffers[i].Dispose();
+                }
+            }
+            if (jupiterOrbitPointBuffer.IsCreated)
+                jupiterOrbitPointBuffer.Dispose();
         }
     }
 }
