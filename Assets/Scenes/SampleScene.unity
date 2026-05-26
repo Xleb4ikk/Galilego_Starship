@@ -699,6 +699,84 @@ MonoBehaviour:
     m_PersistentCalls:
       m_Calls: []
   m_IsOn: 1
+--- !u!1 &234254949
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 234254950}
+  - component: {fileID: 234254951}
+  - component: {fileID: 234254952}
+  m_Layer: 8
+  m_Name: ApsisMarkerSystem
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!4 &234254950
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 234254949}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 598997630}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &234254951
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 234254949}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 20cc48beef90f994ea2c84c4c94c21e1, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::Galilego.Gameplay.ApsisMarkerSystem
+  universeManager: {fileID: 1581560978}
+  referenceCamera: {fileID: 330585545}
+  tooltip: {fileID: 1079844539}
+  periapsisSprite: {fileID: 21300000, guid: d8d4efe30157f2f4197e1e65ea4f6868, type: 3}
+  apoapsisSprite: {fileID: 21300000, guid: dbc5a6799c97ae1439a71899a9a261d6, type: 3}
+  maneuverPeriapsisSprite: {fileID: 21300000, guid: 6255b91c75898864fbd42708d2172c47, type: 3}
+  maneuverApoapsisSprite: {fileID: 21300000, guid: 97ceb4085d1ddf0419f6780c39e89c1a, type: 3}
+  markerSizePixels: 2
+  hoverThresholdPixels: 4
+  useAnalyticalSystem: 1
+--- !u!114 &234254952
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 234254949}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: b436f0b629ce418479a6118381f5c3ce, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::Galilego.Gameplay.ApsisCalculator
+  universeManager: {fileID: 1581560978}
+  maneuverEvaluator: {fileID: 861880901}
+  apsisMarkerSystem: {fileID: 234254951}
+  showOnlyFutureApsides: 1
+  showBelowSurface: 0
+  maxPredictionTime: 50000
+  minAltitude: 0
+  circularOrbitThreshold: 0.001
+  positionChangeThreshold: 1
+  velocityChangeThreshold: 0.1
+  timeChangeThreshold: 0.1
 --- !u!1 &252101490
 GameObject:
   m_ObjectHideFlags: 0
@@ -1179,6 +1257,7 @@ MonoBehaviour:
   minimumDirectionMagnitude: 0.0001
   driveBallTexture: 1
   alignToOrbitalFrame: 0
+  stabilizeBallRollAgainstOrbit: 1
   shipLocalForward: {x: 0, y: 1, z: 0}
   shipLocalUp: {x: 0, y: 0, z: 1}
   flipBallVertical: 1
@@ -1771,7 +1850,9 @@ Transform:
   m_LocalPosition: {x: 56.41684, y: -0, z: 0.20132}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
-  m_Children: []
+  m_Children:
+  - {fileID: 1079844538}
+  - {fileID: 234254950}
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1 &610404100
@@ -2543,6 +2624,7 @@ MonoBehaviour:
   forceSynchronousCalculation: 0
   debounceTime: 0.15
   maxPointsPerLine: 65535
+  moonPredictionSamples: 64
 --- !u!120 &861880902
 LineRenderer:
   serializedVersion: 3
@@ -3387,6 +3469,55 @@ Camera:
   m_OcclusionCulling: 1
   m_StereoConvergence: 10
   m_StereoSeparation: 0.022
+--- !u!1 &1079844537
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 1079844538}
+  - component: {fileID: 1079844539}
+  m_Layer: 8
+  m_Name: OrbitTooltip
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!4 &1079844538
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1079844537}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 598997630}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &1079844539
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1079844537}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 8946cebdd4d6a70488dd2e0571489b69, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::Galilego.UI.OrbitTooltip
+  backgroundColor: {r: 0.1, g: 0.1, b: 0.15, a: 0.9}
+  textColor: {r: 1, g: 1, b: 1, a: 1}
+  warningColor: {r: 1, g: 0.9, b: 0, a: 1}
+  fontSize: 12
+  mouseOffset: {x: 10, y: -10}
 --- !u!1 &1101906102
 GameObject:
   m_ObjectHideFlags: 0
@@ -4930,6 +5061,7 @@ GameObject:
   m_Component:
   - component: {fileID: 1581560979}
   - component: {fileID: 1581560978}
+  - component: {fileID: 1581560980}
   m_Layer: 0
   m_Name: Universe
   m_TagString: Untagged
@@ -4957,7 +5089,6 @@ MonoBehaviour:
     X: 0
     Y: 0
     Z: 0
-  jupiterNorthLocalDirection: {x: 0, y: 1, z: 0}
   ship:
     VisualTransform: {fileID: 1390413975}
     Mass: 1000
@@ -4967,7 +5098,7 @@ MonoBehaviour:
       Y: 0
       Z: -80000000
     InitialVelocity:
-      X: 39794.24140186617
+      X: 49794.24140186617
       Y: 0
       Z: 0
   moonRails:
@@ -4987,6 +5118,9 @@ MonoBehaviour:
     EpochTimeSeconds: 0
     SphereOfInfluenceRadius: 7836288.860561896
     HillSphereRadius: 10515470.593136963
+    SubJupiterLocalDirection: {x: 0, y: 0, z: 1}
+    NorthLocalDirection: {x: 0, y: 1, z: 0}
+    SubJupiterLongitudeOffsetDegrees: 0
   - Name: Europa
     VisualTransform: {fileID: 1940997418}
     StandardGravitationalParameter: 3202712100000
@@ -5003,6 +5137,9 @@ MonoBehaviour:
     EpochTimeSeconds: 0
     SphereOfInfluenceRadius: 9725282.378132932
     HillSphereRadius: 13533692.132135233
+    SubJupiterLocalDirection: {x: 0, y: 0, z: 1}
+    NorthLocalDirection: {x: 0, y: 1, z: 0}
+    SubJupiterLongitudeOffsetDegrees: 0
   - Name: Ganymede
     VisualTransform: {fileID: 145397906}
     StandardGravitationalParameter: 9887832750000
@@ -5019,6 +5156,9 @@ MonoBehaviour:
     EpochTimeSeconds: 0
     SphereOfInfluenceRadius: 24349742.127235938
     HillSphereRadius: 31685560.351326723
+    SubJupiterLocalDirection: {x: 0, y: 0, z: 1}
+    NorthLocalDirection: {x: 0, y: 1, z: 0}
+    SubJupiterLongitudeOffsetDegrees: 0
   - Name: Callisto
     VisualTransform: {fileID: 1516021722}
     StandardGravitationalParameter: 7179283400000
@@ -5035,6 +5175,9 @@ MonoBehaviour:
     EpochTimeSeconds: 0
     SphereOfInfluenceRadius: 37680910.00701851
     HillSphereRadius: 49789775.66815525
+    SubJupiterLocalDirection: {x: 0, y: 0, z: 1}
+    NorthLocalDirection: {x: 0, y: 1, z: 0}
+    SubJupiterLongitudeOffsetDegrees: 0
   worldContainer: {fileID: 1581560979}
   celestialCamera: {fileID: 330585545}
   shipOverlayCamera: {fileID: 1077664056}
@@ -5063,6 +5206,11 @@ MonoBehaviour:
   cameraZoomSmoothing: 10
   orbitMapFocusTarget: 0
   visualDistanceMultiplier: 0.1
+  rotateCelestialBodies: 1
+  jupiterRotationPeriodSeconds: 35729.7
+  jupiterPrimeMeridianLocalDirection: {x: 0, y: 0, z: 1}
+  jupiterNorthLocalDirection: {x: 0, y: 1, z: 0}
+  jupiterRotationOffsetDegrees: 0
   simulationTimeSeconds: 0
   timeScale: 1
   maxSolverStepSeconds: 1
@@ -5085,7 +5233,7 @@ MonoBehaviour:
   moonOrbitScreenWidth: 3
   moonOrbitTailAlpha: 1
   moonOrbitAheadAlpha: 0.08
-  moonOrbitHistoryFraction: 1
+  moonOrbitHistoryDays: 1
   shipTrajectoryColor: {r: 0.25, g: 0.95, b: 1, a: 0.95}
   moonOrbitColor: {r: 0.65, g: 0.85, b: 1, a: 0.4}
   showTelemetryOverlay: 1
@@ -5115,6 +5263,21 @@ Transform:
   - {fileID: 1059242482}
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &1581560980
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1581560977}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: edbe7bf4e5f500c4e8d1c3688a112df1, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::Galilego.Simulation.OrbitAnalyzer
+  universeManager: {fileID: 1581560978}
+  autoAnalyze: 1
+  analysisInterval: 0.5
 --- !u!1 &1681428823
 GameObject:
   m_ObjectHideFlags: 0

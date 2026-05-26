@@ -290,7 +290,33 @@ namespace Galilego.Gameplay
                 ballisticLine.gameObject.SetActive(showBallistic);
             if (showBallistic && ballisticLine != null)
             {
-                float w = universeManager.ResolveWorldLineWidthForPixels(2.25f, 0.02f);
+                // Calculate width based on average distance from camera to line points
+                float avgDistance = 0f;
+                if (ballisticPositions != null && ballisticCount > 0)
+                {
+                    Transform parent = GetTrajectoryParent();
+                    Vector3 camPos = Camera.main != null ? Camera.main.transform.position : Vector3.zero;
+                    
+                    int sampleCount = Mathf.Min(10, ballisticCount);
+                    for (int i = 0; i < sampleCount; i++)
+                    {
+                        int idx = (i * ballisticCount) / sampleCount;
+                        Vector3 worldPos = parent.TransformPoint(ballisticPositions[idx]);
+                        avgDistance += Vector3.Distance(camPos, worldPos);
+                    }
+                    avgDistance /= sampleCount;
+                }
+                else
+                {
+                    avgDistance = 1000f;
+                }
+                
+                float pixelHeight = Camera.main != null ? Camera.main.pixelHeight : 1080f;
+                float fov = Camera.main != null ? Camera.main.fieldOfView : 60f;
+                float frustumHeight = 2f * avgDistance * Mathf.Tan(fov * 0.5f * Mathf.Deg2Rad);
+                float w = frustumHeight * 2.25f / pixelHeight;
+                w = Mathf.Clamp(w, 0.01f, 0.5f);
+                
                 ballisticLine.startWidth = w;
                 ballisticLine.endWidth = w;
                 ballisticLine.alignment = LineAlignment.View;
@@ -319,7 +345,27 @@ namespace Galilego.Gameplay
                     bool showWidth = isDashed ? showDashed : showSolid;
                     if (showWidth)
                     {
-                        float width = universeManager.ResolveWorldLineWidthForPixels(2.25f, 0.02f);
+                        // Calculate width based on average distance from camera to line points
+                        float avgDistance = 0f;
+                        Transform parent = GetTrajectoryParent();
+                        Vector3 camPos = Camera.main != null ? Camera.main.transform.position : Vector3.zero;
+                        
+                        int sampleCount = Mathf.Min(5, line.positionCount);
+                        for (int i = 0; i < sampleCount; i++)
+                        {
+                            int idx = (i * line.positionCount) / Mathf.Max(1, sampleCount);
+                            Vector3 localPos = line.GetPosition(idx);
+                            Vector3 worldPos = parent.TransformPoint(localPos);
+                            avgDistance += Vector3.Distance(camPos, worldPos);
+                        }
+                        avgDistance /= sampleCount;
+                        
+                        float pixelHeight = Camera.main != null ? Camera.main.pixelHeight : 1080f;
+                        float fov = Camera.main != null ? Camera.main.fieldOfView : 60f;
+                        float frustumHeight = 2f * avgDistance * Mathf.Tan(fov * 0.5f * Mathf.Deg2Rad);
+                        float width = frustumHeight * 2.25f / pixelHeight;
+                        width = Mathf.Clamp(width, 0.01f, 0.5f);
+                        
                         line.startWidth = width;
                         line.endWidth = width;
                         line.alignment = LineAlignment.View;
@@ -1220,7 +1266,18 @@ namespace Galilego.Gameplay
                     timeMarkerInstance.transform.localPosition = universeManager.ToUnityOffset(pos - framePos);
                 }
 
-                float markerScale = universeManager.ResolveWorldLineWidthForPixels(5f, 0.01f);
+                // Calculate marker scale based on distance from camera
+                Transform parent = GetTrajectoryParent();
+                Vector3 worldPos = parent.TransformPoint(timeMarkerInstance.transform.localPosition);
+                Vector3 camPos = Camera.main != null ? Camera.main.transform.position : Vector3.zero;
+                float distance = Vector3.Distance(camPos, worldPos);
+                
+                float pixelHeight = Camera.main != null ? Camera.main.pixelHeight : 1080f;
+                float fov = Camera.main != null ? Camera.main.fieldOfView : 60f;
+                float frustumHeight = 2f * distance * Mathf.Tan(fov * 0.5f * Mathf.Deg2Rad);
+                float markerScale = frustumHeight * 5f / pixelHeight;
+                markerScale = Mathf.Clamp(markerScale, 0.01f, 1.0f);
+                
                 if (!float.IsNaN(markerScale) && !float.IsInfinity(markerScale) && markerScale > 0.00001f)
                     timeMarkerInstance.transform.localScale = Vector3.one * markerScale;
             }
@@ -1281,6 +1338,24 @@ namespace Galilego.Gameplay
                 600.0);
             double substepLimit = ResolveSubstepLimitSeconds(majorStep);
             return (int)Math.Ceiling(majorStep / Math.Max(1e-9, substepLimit));
+        }
+
+        /// <summary>
+        /// Tries to get the segment boundary state at the specified index.
+        /// Segment boundaries represent the state after each maneuver node's delta-v is applied.
+        /// </summary>
+        /// <param name="index">The segment index (0-based)</param>
+        /// <param name="boundary">The boundary state if found</param>
+        /// <returns>True if the boundary exists, false otherwise</returns>
+        public bool TryGetSegmentBoundaryState(int index, out SegmentBoundaryState boundary)
+        {
+            boundary = default;
+            
+            if (index < 0 || index >= cachedBoundaries.Count)
+                return false;
+            
+            boundary = cachedBoundaries[index];
+            return true;
         }
 
         private static int ResolveTrajectoryLayer()
@@ -1423,10 +1498,8 @@ namespace Galilego.Gameplay
             ReferenceFrameTarget frame = universeManager.ActiveReferenceFrame;
             int samples = Math.Max(2, moonPredictionSamples);
 
-            float lineWidth = universeManager.ResolveWorldLineWidthForPixels(1.5f, 0.01f);
-            float markerScale = universeManager.ResolveWorldLineWidthForPixels(4f, 0.008f);
-            if (float.IsNaN(markerScale) || float.IsInfinity(markerScale) || markerScale <= 0.00001f)
-                markerScale = 0.4f;
+            // lineWidth and markerScale will be calculated per-line based on distance
+            float markerScale = 0.4f; // default fallback
 
             // ── Precompute sample times and frame positions at each time ──────────
             // Same as spacecraft trajectory: each point uses framePos AT THAT TIME,
@@ -1503,6 +1576,26 @@ namespace Galilego.Gameplay
                     }
 
                     cache.Line.SetPositions(cache.LocalPositionsBuffer);
+                    
+                    // Calculate width based on average distance from camera to line points
+                    float avgDistance = 0f;
+                    Transform parent = GetTrajectoryParent();
+                    Vector3 camPos = Camera.main != null ? Camera.main.transform.position : Vector3.zero;
+                    int sampleCount = Mathf.Min(5, samples);
+                    for (int j = 0; j < sampleCount; j++)
+                    {
+                        int idx = (j * samples) / Mathf.Max(1, sampleCount);
+                        Vector3 worldPos = parent.TransformPoint(cache.LocalPositionsBuffer[idx]);
+                        avgDistance += Vector3.Distance(camPos, worldPos);
+                    }
+                    avgDistance /= sampleCount;
+                    
+                    float pixelHeight = Camera.main != null ? Camera.main.pixelHeight : 1080f;
+                    float fov = Camera.main != null ? Camera.main.fieldOfView : 60f;
+                    float frustumHeight = 2f * avgDistance * Mathf.Tan(fov * 0.5f * Mathf.Deg2Rad);
+                    float lineWidth = frustumHeight * 1.5f / pixelHeight;
+                    lineWidth = Mathf.Clamp(lineWidth, 0.01f, 0.5f);
+                    
                     cache.Line.startWidth = lineWidth;
                     cache.Line.endWidth = lineWidth;
                     if (cache.Line.gameObject.activeSelf != show)
