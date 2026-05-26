@@ -79,6 +79,7 @@ namespace Galilego.Gameplay
 
         private JobHandle ephemerisJobHandle;
         private JobHandle trajectoryJobHandle;
+        private JobHandle ballisticJobHandle;
         private bool isJobRunning = false;
 
         // Cache to skip recalculation when inputs haven't changed
@@ -86,7 +87,13 @@ namespace Galilego.Gameplay
         private double3? cachedStartVel;
         private double? cachedStartTime;
         private double? cachedPredictionLength;
+        private ReferenceFrameTarget cachedReferenceFrame = ReferenceFrameTarget.Jupiter;
         private List<ManeuverNodeData> cachedNodeData = new List<ManeuverNodeData>();
+
+        // Cached marker position for use during scrubbing (when fullTrajectoryPoints is cleared)
+        private Vector3d cachedMarkerPos;
+        private double cachedMarkerTime;
+        private bool hasCachedMarkerPos;
 
         // Segment-level cache: per-boundary states for partial recalculation
         private List<SegmentBoundaryState> cachedBoundaries = new List<SegmentBoundaryState>();
@@ -119,6 +126,18 @@ namespace Galilego.Gameplay
         private double[] ballisticTimesData;
         private int ballisticCount;
 
+        private void OnEnable()
+        {
+            if (universeManager == null)
+                universeManager = FindAnyObjectByType<UniverseManager>();
+
+            if (universeManager != null)
+            {
+                universeManager.ActiveReferenceFrameChanged -= HandleActiveReferenceFrameChanged;
+                universeManager.ActiveReferenceFrameChanged += HandleActiveReferenceFrameChanged;
+            }
+        }
+
         private void Start()
         {
             if (universeManager == null)
@@ -136,6 +155,9 @@ namespace Galilego.Gameplay
 
         private void OnDisable()
         {
+            if (universeManager != null)
+                universeManager.ActiveReferenceFrameChanged -= HandleActiveReferenceFrameChanged;
+
             foreach (var line in segmentLines)
             {
                 if (line != null && line.gameObject != null)
@@ -147,6 +169,7 @@ namespace Galilego.Gameplay
         private void OnDestroy()
         {
             CompleteAndDisposeJobs();
+            DisposeAllNativeBuffers();
             ClearLines();
             ClearMoonPredictionVisuals();
         }
@@ -160,6 +183,8 @@ namespace Galilego.Gameplay
                 {
                     isDirty = false;
                     dirtyTimer = 0f;
+                    if (ScrubbingActive)
+                        skipClearOnNextRecalc = true;
                     RequestRecalculation();
                 }
             }
@@ -169,6 +194,20 @@ namespace Galilego.Gameplay
                 if (trajectoryJobHandle.IsCompleted)
                 {
                     CompleteJobAndSwap();
+                    // If scrubbing is still changing values, schedule next job
+                    // without clearing lines (keeps old trajectory visible)
+                    if (isDirty)
+                    {
+                        isDirty = false;
+                        dirtyTimer = 0f;
+                        skipClearOnNextRecalc = true;
+                        hasPartialCacheHit = false;
+                        fullTrajectoryPoints.Clear();
+                        fullTrajectoryTimes.Clear();
+                        fullTrajectoryIsDashed.Clear();
+                        ScheduleJobs();
+                        UpdateCache();
+                    }
                 }
             }
 
@@ -251,7 +290,33 @@ namespace Galilego.Gameplay
                 ballisticLine.gameObject.SetActive(showBallistic);
             if (showBallistic && ballisticLine != null)
             {
-                float w = universeManager.ResolveWorldLineWidthForPixels(2.25f, 0.02f);
+                // Calculate width based on average distance from camera to line points
+                float avgDistance = 0f;
+                if (ballisticPositions != null && ballisticCount > 0)
+                {
+                    Transform parent = GetTrajectoryParent();
+                    Vector3 camPos = Camera.main != null ? Camera.main.transform.position : Vector3.zero;
+                    
+                    int sampleCount = Mathf.Min(10, ballisticCount);
+                    for (int i = 0; i < sampleCount; i++)
+                    {
+                        int idx = (i * ballisticCount) / sampleCount;
+                        Vector3 worldPos = parent.TransformPoint(ballisticPositions[idx]);
+                        avgDistance += Vector3.Distance(camPos, worldPos);
+                    }
+                    avgDistance /= sampleCount;
+                }
+                else
+                {
+                    avgDistance = 1000f;
+                }
+                
+                float pixelHeight = Camera.main != null ? Camera.main.pixelHeight : 1080f;
+                float fov = Camera.main != null ? Camera.main.fieldOfView : 60f;
+                float frustumHeight = 2f * avgDistance * Mathf.Tan(fov * 0.5f * Mathf.Deg2Rad);
+                float w = frustumHeight * 2.25f / pixelHeight;
+                w = Mathf.Clamp(w, 0.01f, 0.5f);
+                
                 ballisticLine.startWidth = w;
                 ballisticLine.endWidth = w;
                 ballisticLine.alignment = LineAlignment.View;
@@ -280,7 +345,27 @@ namespace Galilego.Gameplay
                     bool showWidth = isDashed ? showDashed : showSolid;
                     if (showWidth)
                     {
-                        float width = universeManager.ResolveWorldLineWidthForPixels(2.25f, 0.02f);
+                        // Calculate width based on average distance from camera to line points
+                        float avgDistance = 0f;
+                        Transform parent = GetTrajectoryParent();
+                        Vector3 camPos = Camera.main != null ? Camera.main.transform.position : Vector3.zero;
+                        
+                        int sampleCount = Mathf.Min(5, line.positionCount);
+                        for (int i = 0; i < sampleCount; i++)
+                        {
+                            int idx = (i * line.positionCount) / Mathf.Max(1, sampleCount);
+                            Vector3 localPos = line.GetPosition(idx);
+                            Vector3 worldPos = parent.TransformPoint(localPos);
+                            avgDistance += Vector3.Distance(camPos, worldPos);
+                        }
+                        avgDistance /= sampleCount;
+                        
+                        float pixelHeight = Camera.main != null ? Camera.main.pixelHeight : 1080f;
+                        float fov = Camera.main != null ? Camera.main.fieldOfView : 60f;
+                        float frustumHeight = 2f * avgDistance * Mathf.Tan(fov * 0.5f * Mathf.Deg2Rad);
+                        float width = frustumHeight * 2.25f / pixelHeight;
+                        width = Mathf.Clamp(width, 0.01f, 0.5f);
+                        
                         line.startWidth = width;
                         line.endWidth = width;
                         line.alignment = LineAlignment.View;
@@ -320,13 +405,22 @@ namespace Galilego.Gameplay
 
         public void MarkAsDirtyLightweight()
         {
+            if (!isDirty)
+                dirtyTimer = 0f;
             isDirty = true;
-            dirtyTimer = 0f;
+        }
+
+        private void HandleActiveReferenceFrameChanged(ReferenceFrameTarget _)
+        {
+            MarkAsDirty();
         }
 
         private bool MatchesCachedInput()
         {
             if (!cachedStartPos.HasValue || !cachedStartVel.HasValue || !cachedStartTime.HasValue)
+                return false;
+
+            if (universeManager.ActiveReferenceFrame != cachedReferenceFrame)
                 return false;
 
             double3 pos = JobTypeConversion.ToDouble3(universeManager.ShipBody.Position);
@@ -371,10 +465,15 @@ namespace Galilego.Gameplay
                 ? flightPlan.PredictionLengthSeconds
                 : defaultPredictionLengthSeconds;
 
+            cachedReferenceFrame = lockedReferenceFrame;
+
             cachedNodeData.Clear();
             for (int i = 0; i < flightPlan.Nodes.Count; i++)
                 cachedNodeData.Add(JobTypeConversion.ToNodeData(flightPlan.Nodes[i]));
         }
+
+        private bool skipClearOnNextRecalc;
+        public bool ScrubbingActive { get; set; }
 
         public void RequestRecalculation()
         {
@@ -405,7 +504,9 @@ namespace Galilego.Gameplay
             TryFindPartialRestartPoint();
 
             CompleteAndDisposeJobs();
-            ClearLines();
+            if (!skipClearOnNextRecalc)
+                ClearLines();
+            skipClearOnNextRecalc = false;
 
             if (hasPartialCacheHit)
             {
@@ -508,6 +609,15 @@ namespace Galilego.Gameplay
             }
         }
 
+        private NativeArray<T> ResizeBuffer<T>(NativeArray<T> existing, int requiredSize) where T : unmanaged
+        {
+            if (existing.IsCreated && existing.Length >= requiredSize)
+                return existing;
+            if (existing.IsCreated)
+                existing.Dispose();
+            return new NativeArray<T>(requiredSize, Allocator.Persistent);
+        }
+
         private void ScheduleJobs()
         {
             flightPlan.Nodes.Sort((a, b) => a.StartTime.CompareTo(b.StartTime));
@@ -580,30 +690,34 @@ namespace Galilego.Gameplay
             int ephemerisSampleCount = Math.Max(2, (int)(predictionSpan / ephemerisStep) + 1);
             ephemerisSampleCount = Math.Min(ephemerisSampleCount, 50000);
 
-            nativeEphemerisTimes = new NativeArray<double>(ephemerisSampleCount, Allocator.Persistent);
+            nativeEphemerisTimes = ResizeBuffer(nativeEphemerisTimes, ephemerisSampleCount);
             for (int i = 0; i < ephemerisSampleCount; i++)
                 nativeEphemerisTimes[i] = baseStartTime + i * ephemerisStep;
             nativeEphemerisTimes[ephemerisSampleCount - 1] = endTime;
 
-            nativeEphemerisResults = new NativeArray<BodyState>(
-                ephemerisSampleCount * moonCount, Allocator.Persistent);
-            nativeEphemerisVelocities = new NativeArray<double3>(
-                ephemerisSampleCount * moonCount, Allocator.Persistent);
+            int flatEphemerisCount = ephemerisSampleCount * moonCount;
+            nativeEphemerisResults = ResizeBuffer(nativeEphemerisResults, flatEphemerisCount);
+            nativeEphemerisVelocities = ResizeBuffer(nativeEphemerisVelocities, flatEphemerisCount);
 
-            nativeTrajectoryOutput = new NativeArray<TrajectoryPoint>(
-                adjustedMaxPoints, Allocator.Persistent);
-            nativeBallisticOutput = new NativeArray<TrajectoryPoint>(
-                adjustedMaxPoints, Allocator.Persistent);
-            nativePointCount = new NativeReference<int>(0, Allocator.Persistent);
-            nativeBallisticPointCount = new NativeReference<int>(0, Allocator.Persistent);
-            nativeBoundaries = new NativeArray<SegmentBoundaryState>(
-                nodeCount + 2, Allocator.Persistent);
-            nativeBoundaryCount = new NativeReference<int>(0, Allocator.Persistent);
-            nativeCalcStatus = new NativeReference<int>(0, Allocator.Persistent);
-            nativeBallisticCalcStatus = new NativeReference<int>(0, Allocator.Persistent);
+            nativeTrajectoryOutput = ResizeBuffer(nativeTrajectoryOutput, adjustedMaxPoints);
+            nativeBallisticOutput = ResizeBuffer(nativeBallisticOutput, adjustedMaxPoints);
+            if (!nativePointCount.IsCreated) nativePointCount = new NativeReference<int>(0, Allocator.Persistent);
+            if (!nativeBallisticPointCount.IsCreated) nativeBallisticPointCount = new NativeReference<int>(0, Allocator.Persistent);
+            nativeBoundaries = ResizeBuffer(nativeBoundaries, nodeCount + 2);
+            if (!nativeBoundaryCount.IsCreated) nativeBoundaryCount = new NativeReference<int>(0, Allocator.Persistent);
+            if (!nativeCalcStatus.IsCreated) nativeCalcStatus = new NativeReference<int>(0, Allocator.Persistent);
+            if (!nativeBallisticCalcStatus.IsCreated) nativeBallisticCalcStatus = new NativeReference<int>(0, Allocator.Persistent);
 
-            nativeBallisticBoundaries = new NativeArray<SegmentBoundaryState>(1, Allocator.Persistent);
-            nativeBallisticBoundaryCount = new NativeReference<int>(0, Allocator.Persistent);
+            nativeBallisticBoundaries = ResizeBuffer(nativeBallisticBoundaries, 1);
+            if (!nativeBallisticBoundaryCount.IsCreated) nativeBallisticBoundaryCount = new NativeReference<int>(0, Allocator.Persistent);
+
+            // Reset output refs before scheduling (clean slate for reuse)
+            nativePointCount.Value = 0;
+            nativeBallisticPointCount.Value = 0;
+            nativeBoundaryCount.Value = 0;
+            nativeBallisticBoundaryCount.Value = 0;
+            nativeCalcStatus.Value = 0;
+            nativeBallisticCalcStatus.Value = 0;
 
             if (moonCount > 0)
             {
@@ -615,7 +729,7 @@ namespace Galilego.Gameplay
                     JupiterPosition = jupiterPos,
                     PlaneMapping = planeMapping
                 };
-                ephemerisJobHandle = moonJob.Schedule(ephemerisSampleCount, 64);
+                ephemerisJobHandle = moonJob.Schedule(flatEphemerisCount, 64);
 
                 var velJob = new EphemerisVelocityJob
                 {
@@ -624,7 +738,7 @@ namespace Galilego.Gameplay
                     Velocities = nativeEphemerisVelocities,
                     MoonCount = moonCount
                 };
-                ephemerisJobHandle = velJob.Schedule(ephemerisSampleCount, 64, ephemerisJobHandle);
+                ephemerisJobHandle = velJob.Schedule(flatEphemerisCount, 64, ephemerisJobHandle);
             }
             else
             {
@@ -639,6 +753,7 @@ namespace Galilego.Gameplay
                 MoonVelocities = nativeEphemerisVelocities,
                 MoonCount = moonCount,
                 PlaneMapping = planeMapping,
+                ReferenceFrameIndex = (int)lockedReferenceFrame,
 
                 StartPos = startPos,
                 StartVel = startVel,
@@ -666,7 +781,7 @@ namespace Galilego.Gameplay
                 SegmentBoundaryCount = nativeBallisticBoundaryCount
             };
 
-            var ballisticHandle = ballisticTrajectoryJob.Schedule(ephemerisJobHandle);
+            ballisticJobHandle = ballisticTrajectoryJob.Schedule(ephemerisJobHandle);
 
             var trajectoryJob = new FullTrajectoryJob
             {
@@ -676,6 +791,7 @@ namespace Galilego.Gameplay
                 MoonVelocities = nativeEphemerisVelocities,
                 MoonCount = moonCount,
                 PlaneMapping = planeMapping,
+                ReferenceFrameIndex = (int)lockedReferenceFrame,
 
                 StartPos = startPos,
                 StartVel = startVel,
@@ -703,7 +819,8 @@ namespace Galilego.Gameplay
                 SegmentBoundaryCount = nativeBoundaryCount
             };
 
-            trajectoryJobHandle = trajectoryJob.Schedule(ballisticHandle);
+            var maneuverHandle = trajectoryJob.Schedule(ephemerisJobHandle);
+            trajectoryJobHandle = JobHandle.CombineDependencies(ballisticJobHandle, maneuverHandle);
             JobHandle.ScheduleBatchedJobs();
             isJobRunning = true;
 
@@ -827,10 +944,31 @@ namespace Galilego.Gameplay
 
             DisposeJobResources();
             isJobRunning = false;
+            // Cache last trajectory end point for marker during scrubbing
+            hasCachedMarkerPos = fullTrajectoryPoints.Count > 0;
+            if (hasCachedMarkerPos)
+            {
+                cachedMarkerPos = fullTrajectoryPoints[fullTrajectoryPoints.Count - 1];
+                cachedMarkerTime = fullTrajectoryTimes[fullTrajectoryTimes.Count - 1];
+            }
             UpdateVisibility();
         }
 
         private void DisposeJobResources()
+        {
+            // Dispose small/frequently-changing arrays; keep large buffers for reuse
+            if (nativeMoonOrbits.IsCreated) nativeMoonOrbits.Dispose();
+            if (nativeNodeData.IsCreated) nativeNodeData.Dispose();
+            if (nativeBallisticNodeData.IsCreated) nativeBallisticNodeData.Dispose();
+            // These large buffers persist across frames — only recreate when size grows
+            // nativeEphemerisTimes, nativeEphemerisResults, nativeEphemerisVelocities,
+            // nativeTrajectoryOutput, nativeBallisticOutput, nativeBoundaries,
+            // nativeBallisticBoundaries, nativePointCount, nativeBallisticPointCount,
+            // nativeBoundaryCount, nativeCalcStatus, nativeBallisticCalcStatus,
+            // nativeBallisticBoundaryCount are reused
+        }
+
+        private void DisposeAllNativeBuffers()
         {
             if (nativeMoonOrbits.IsCreated) nativeMoonOrbits.Dispose();
             if (nativeNodeData.IsCreated) nativeNodeData.Dispose();
@@ -1096,6 +1234,13 @@ namespace Galilego.Gameplay
                 found = true;
             }
 
+            if (!found && hasCachedMarkerPos)
+            {
+                pos = cachedMarkerPos;
+                targetTime = cachedMarkerTime;
+                found = true;
+            }
+
             if (found)
             {
                 if (timeMarkerInstance == null)
@@ -1121,7 +1266,18 @@ namespace Galilego.Gameplay
                     timeMarkerInstance.transform.localPosition = universeManager.ToUnityOffset(pos - framePos);
                 }
 
-                float markerScale = universeManager.ResolveWorldLineWidthForPixels(5f, 0.01f);
+                // Calculate marker scale based on distance from camera
+                Transform parent = GetTrajectoryParent();
+                Vector3 worldPos = parent.TransformPoint(timeMarkerInstance.transform.localPosition);
+                Vector3 camPos = Camera.main != null ? Camera.main.transform.position : Vector3.zero;
+                float distance = Vector3.Distance(camPos, worldPos);
+                
+                float pixelHeight = Camera.main != null ? Camera.main.pixelHeight : 1080f;
+                float fov = Camera.main != null ? Camera.main.fieldOfView : 60f;
+                float frustumHeight = 2f * distance * Mathf.Tan(fov * 0.5f * Mathf.Deg2Rad);
+                float markerScale = frustumHeight * 5f / pixelHeight;
+                markerScale = Mathf.Clamp(markerScale, 0.01f, 1.0f);
+                
                 if (!float.IsNaN(markerScale) && !float.IsInfinity(markerScale) && markerScale > 0.00001f)
                     timeMarkerInstance.transform.localScale = Vector3.one * markerScale;
             }
@@ -1182,6 +1338,24 @@ namespace Galilego.Gameplay
                 600.0);
             double substepLimit = ResolveSubstepLimitSeconds(majorStep);
             return (int)Math.Ceiling(majorStep / Math.Max(1e-9, substepLimit));
+        }
+
+        /// <summary>
+        /// Tries to get the segment boundary state at the specified index.
+        /// Segment boundaries represent the state after each maneuver node's delta-v is applied.
+        /// </summary>
+        /// <param name="index">The segment index (0-based)</param>
+        /// <param name="boundary">The boundary state if found</param>
+        /// <returns>True if the boundary exists, false otherwise</returns>
+        public bool TryGetSegmentBoundaryState(int index, out SegmentBoundaryState boundary)
+        {
+            boundary = default;
+            
+            if (index < 0 || index >= cachedBoundaries.Count)
+                return false;
+            
+            boundary = cachedBoundaries[index];
+            return true;
         }
 
         private static int ResolveTrajectoryLayer()
@@ -1324,10 +1498,8 @@ namespace Galilego.Gameplay
             ReferenceFrameTarget frame = universeManager.ActiveReferenceFrame;
             int samples = Math.Max(2, moonPredictionSamples);
 
-            float lineWidth = universeManager.ResolveWorldLineWidthForPixels(1.5f, 0.01f);
-            float markerScale = universeManager.ResolveWorldLineWidthForPixels(4f, 0.008f);
-            if (float.IsNaN(markerScale) || float.IsInfinity(markerScale) || markerScale <= 0.00001f)
-                markerScale = 0.4f;
+            // lineWidth and markerScale will be calculated per-line based on distance
+            float markerScale = 0.4f; // default fallback
 
             // ── Precompute sample times and frame positions at each time ──────────
             // Same as spacecraft trajectory: each point uses framePos AT THAT TIME,
@@ -1404,6 +1576,26 @@ namespace Galilego.Gameplay
                     }
 
                     cache.Line.SetPositions(cache.LocalPositionsBuffer);
+                    
+                    // Calculate width based on average distance from camera to line points
+                    float avgDistance = 0f;
+                    Transform parent = GetTrajectoryParent();
+                    Vector3 camPos = Camera.main != null ? Camera.main.transform.position : Vector3.zero;
+                    int sampleCount = Mathf.Min(5, samples);
+                    for (int j = 0; j < sampleCount; j++)
+                    {
+                        int idx = (j * samples) / Mathf.Max(1, sampleCount);
+                        Vector3 worldPos = parent.TransformPoint(cache.LocalPositionsBuffer[idx]);
+                        avgDistance += Vector3.Distance(camPos, worldPos);
+                    }
+                    avgDistance /= sampleCount;
+                    
+                    float pixelHeight = Camera.main != null ? Camera.main.pixelHeight : 1080f;
+                    float fov = Camera.main != null ? Camera.main.fieldOfView : 60f;
+                    float frustumHeight = 2f * avgDistance * Mathf.Tan(fov * 0.5f * Mathf.Deg2Rad);
+                    float lineWidth = frustumHeight * 1.5f / pixelHeight;
+                    lineWidth = Mathf.Clamp(lineWidth, 0.01f, 0.5f);
+                    
                     cache.Line.startWidth = lineWidth;
                     cache.Line.endWidth = lineWidth;
                     if (cache.Line.gameObject.activeSelf != show)

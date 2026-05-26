@@ -18,6 +18,8 @@ namespace Galilego.Gameplay
         [SerializeField] private double predictionStepSeconds = 2d;
         [SerializeField] private double maxPredictionSubstepSeconds = 0d;
 
+        public double TotalPredictionDurationSeconds => predictionSteps * predictionStepSeconds;
+
         [Header("Performance")]
         [SerializeField] private bool autoRefresh = true;
         [SerializeField] private float refreshIntervalSeconds = 0.15f;
@@ -48,10 +50,15 @@ namespace Galilego.Gameplay
             }
 
             refreshQueued = false;
+
+            if (lineRenderer != null)
+                lineRenderer.positionCount = 0;
         }
 
         private void Update()
         {
+            UpdateLineWidth();
+
             if (!autoRefresh)
             {
                 return;
@@ -64,6 +71,49 @@ namespace Galilego.Gameplay
 
             nextRefreshTime = Time.unscaledTime + Mathf.Max(0.01f, refreshIntervalSeconds);
             RequestRefresh();
+        }
+
+        private void UpdateLineWidth()
+        {
+            if (lineRenderer == null || universeManager == null)
+            {
+                return;
+            }
+
+            // Calculate width based on average distance from camera to line points
+            float avgDistance = 0f;
+            if (lineRenderer.positionCount > 0)
+            {
+                Transform parent = transform;
+                Vector3 camPos = Camera.main != null ? Camera.main.transform.position : Vector3.zero;
+                
+                // Sample a few points along the line to get average distance
+                int sampleCount = Mathf.Min(5, lineRenderer.positionCount);
+                for (int i = 0; i < sampleCount; i++)
+                {
+                    int idx = (i * lineRenderer.positionCount) / Mathf.Max(1, sampleCount);
+                    Vector3 localPos = lineRenderer.GetPosition(idx);
+                    Vector3 worldPos = parent.TransformPoint(localPos);
+                    avgDistance += Vector3.Distance(camPos, worldPos);
+                }
+                avgDistance /= sampleCount;
+            }
+            else
+            {
+                avgDistance = 1000f; // fallback
+            }
+            
+            // Calculate width for constant screen-space size
+            float pixelHeight = Camera.main != null ? Camera.main.pixelHeight : 1080f;
+            float fov = Camera.main != null ? Camera.main.fieldOfView : 60f;
+            float frustumHeight = 2f * avgDistance * Mathf.Tan(fov * 0.5f * Mathf.Deg2Rad);
+            float width = frustumHeight * 2.5f / pixelHeight;
+            
+            // Clamp width to reasonable range
+            width = Mathf.Clamp(width, 0.01f, 0.5f);
+            
+            lineRenderer.startWidth = width;
+            lineRenderer.endWidth = width;
         }
 
         public void ForceRefresh()

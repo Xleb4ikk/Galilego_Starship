@@ -71,6 +71,7 @@ namespace Galilego.UI
         // Scrub state
         private float predictionScrubValue = 0f;
         private float moonHistoryScrubValue = 0f;
+        private List<float> dvScrubValues = new List<float>();
 
         // Статус ошибки
         private ManeuverStatus currentStatus = ManeuverStatus.OK;
@@ -165,6 +166,25 @@ namespace Galilego.UI
             }
 #endif
 
+            // Determine if any scrub is active (prediction time or Dv)
+            bool anyScrubActive = Mathf.Abs(predictionScrubValue) > 0.01f;
+            if (dvScrubValues != null && dvScrubValues.Count > 0 && flightPlan != null)
+            {
+                int nodeCount = flightPlan.Nodes.Count;
+                for (int i = 0; i < nodeCount; i++)
+                {
+                    var node = flightPlan.Nodes[i];
+                    for (int axis = 0; axis < 3; axis++)
+                    {
+                        float scrVal = dvScrubValues[DvScrubIndex(i, axis)];
+                        if (Mathf.Abs(scrVal) > 0.01f)
+                            anyScrubActive = true;
+                    }
+                }
+            }
+            if (evaluator != null)
+                evaluator.ScrubbingActive = anyScrubActive;
+
             // Apply scrub rate (centered spring-loaded slider)
             if (Mathf.Abs(predictionScrubValue) > 0.01f && flightPlan != null)
             {
@@ -185,9 +205,38 @@ namespace Galilego.UI
             {
                 float v = moonHistoryScrubValue;
                 float effectivePos = v > 0f ? v * v : -(v * v);
-                float rate = effectivePos * 12f; // days per second, quadratic for finer control near center
+                float rate = effectivePos * 3f; // days per second, quadratic for finer control near center
                 float newDays = Mathf.Clamp(universeManager.MoonOrbitHistoryDays + rate * Time.unscaledDeltaTime, 0.0007f, 365f);
                 universeManager.MoonOrbitHistoryDays = newDays;
+            }
+
+            // Process Dv axis scrubs
+            if (dvScrubValues != null && dvScrubValues.Count > 0 && flightPlan != null)
+            {
+                int nodeCount = flightPlan.Nodes.Count;
+                bool anyDvScrub = false;
+                for (int i = 0; i < nodeCount; i++)
+                {
+                    var node = flightPlan.Nodes[i];
+                    for (int axis = 0; axis < 3; axis++)
+                    {
+                        float scrVal = dvScrubValues[DvScrubIndex(i, axis)];
+                        if (Mathf.Abs(scrVal) > 0.01f)
+                        {
+                            anyDvScrub = true;
+                            double v = scrVal;
+                            double effectivePos = v > 0 ? v * v : -(v * v);
+                            double currentDv = axis == 0 ? node.DvPrograde : (axis == 1 ? node.DvNormal : node.DvRadial);
+                            double rate = (5.0 + System.Math.Sqrt(Math.Abs(currentDv) + 1.0) * 3.0) * effectivePos;
+                            double newDv = currentDv + rate * Time.unscaledDeltaTime;
+                            if (axis == 0) node.DvPrograde = newDv;
+                            else if (axis == 1) node.DvNormal = newDv;
+                            else node.DvRadial = newDv;
+                        }
+                    }
+                }
+                if (anyDvScrub)
+                    evaluator?.MarkAsDirtyLightweight();
             }
 
             // Reset scrub when mouse released anywhere (not just inside window)
@@ -200,6 +249,8 @@ namespace Galilego.UI
             {
                 predictionScrubValue = 0f;
                 moonHistoryScrubValue = 0f;
+                for (int i = 0; i < dvScrubValues.Count; i++)
+                    dvScrubValues[i] = 0f;
             }
 
             // Update prediction offset
@@ -476,6 +527,7 @@ namespace Galilego.UI
         // ─── Coasts and maneuvers ───────────────────────────────────────────────
         private void DrawCoastsAndManeuvers()
         {
+            SyncDvScrubValues();
             int nodeCount = flightPlan.Nodes.Count;
             double currentTime = universeManager != null ? universeManager.SimulationTimeSeconds : 0;
 
@@ -811,6 +863,14 @@ namespace Galilego.UI
 
             GUILayout.EndHorizontal();
 
+            // Spring-loaded scrub slider (same as prediction time)
+            int scrubIdx = DvScrubIndex(nodeIndex, axisIndex);
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("◀", styleLabelDim, GUILayout.Width(14));
+            dvScrubValues[scrubIdx] = GUILayout.HorizontalSlider(dvScrubValues[scrubIdx], -1f, 1f);
+            GUILayout.Label("▶", styleLabelDim, GUILayout.Width(14));
+            GUILayout.EndHorizontal();
+
             // Increment buttons
             GUILayout.BeginHorizontal();
             foreach (double step in DV_STEPS)
@@ -862,6 +922,22 @@ namespace Galilego.UI
         }
 
         // ─── Internal helpers ────────────────────────────────────────────────────
+        private int DvScrubIndex(int nodeIndex, int axisIndex) => nodeIndex * 3 + axisIndex;
+
+        private void SyncDvScrubValues()
+        {
+            if (flightPlan == null)
+            {
+                dvScrubValues.Clear();
+                return;
+            }
+            int needed = flightPlan.Nodes.Count * 3;
+            while (dvScrubValues.Count < needed)
+                dvScrubValues.Add(0f);
+            while (dvScrubValues.Count > needed)
+                dvScrubValues.RemoveAt(dvScrubValues.Count - 1);
+        }
+
         private void EnsureAtLeastOneNode()
         {
             if (flightPlan == null || flightPlan.Nodes.Count > 0) return;
