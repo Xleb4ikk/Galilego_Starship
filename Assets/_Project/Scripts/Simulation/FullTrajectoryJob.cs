@@ -152,7 +152,42 @@ namespace Galilego.Simulation
                         break;
                     }
 
-                    double stepTime = math.min(majorStep, targetTime - currentTime);
+                    // OPTIMIZATION: Adaptive step size based on proximity to celestial bodies
+                    // Far from bodies: larger steps (up to 10x)
+                    // Near bodies: smaller steps (down to 0.1x)
+                    double minDistToBody = double.MaxValue;
+                    
+                    // Check distance to Jupiter
+                    double distToJupiter = math.length(currentPos - JupiterPosition);
+                    minDistToBody = math.min(minDistToBody, distToJupiter);
+                    
+                    // Check distance to moons (if ephemeris available)
+                    if (MoonEphemeris.Length > 0 && EphemerisTimes.Length > 0)
+                    {
+                        int timesLen = EphemerisTimes.Length;
+                        int idx = ephemIdx;
+                        if (idx >= 0 && idx < timesLen)
+                        {
+                            int baseIdx = idx * MoonCount;
+                            for (int m = 0; m < MoonCount && baseIdx + m < MoonEphemeris.Length; m++)
+                            {
+                                double3 moonPos = MoonEphemeris[baseIdx + m].Position;
+                                double distToMoon = math.length(currentPos - moonPos);
+                                minDistToBody = math.min(minDistToBody, distToMoon);
+                            }
+                        }
+                    }
+                    
+                    // Adaptive factor: 
+                    // - At 100,000 km: factor = 1.0 (normal step)
+                    // - At 1,000,000 km: factor = 10.0 (10x larger step)
+                    // - At 10,000 km: factor = 0.1 (10x smaller step)
+                    const double referenceDistance = 1e8; // 100,000 km in meters
+                    double adaptiveFactor = math.clamp(minDistToBody / referenceDistance, 0.1, 10.0);
+                    
+                    // Apply adaptive factor to major step
+                    double adaptiveMajorStep = majorStep * adaptiveFactor;
+                    double stepTime = math.min(adaptiveMajorStep, targetTime - currentTime);
                     if (stepTime <= 0.0) break;
 
                     int internalSteps = CalculateAdaptiveSubsteps(stepTime, substepLimit);

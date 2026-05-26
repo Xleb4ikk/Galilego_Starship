@@ -165,33 +165,92 @@ namespace Galilego.Gameplay
         /// <summary>
         /// Filters out maneuver apsides that are too close to ballistic apsides.
         /// This prevents overlapping markers when maneuvers don't significantly change the orbit.
+        /// OPTIMIZED: Uses spatial hashing to reduce O(n²) to O(n) complexity.
         /// </summary>
         private void FilterDuplicateApsides(List<ApsisData> ballisticApsides, List<ApsisData> maneuverApsides)
         {
             const double TIME_THRESHOLD = 10.0; // seconds
             const double POSITION_THRESHOLD = 1000.0; // meters
+            const double TIME_BUCKET = 5.0; // seconds - bucket size for spatial hash
+            const double POS_BUCKET = 500.0; // meters - bucket size for spatial hash
 
+            // Early exit if no ballistic apsides to compare against
+            if (ballisticApsides.Count == 0)
+                return;
+
+            // Build spatial hash for ballistic apsides
+            // Key: spatial hash, Value: list of indices in ballisticApsides
+            Dictionary<long, List<int>> spatialHash = new Dictionary<long, List<int>>();
+            
+            for (int i = 0; i < ballisticApsides.Count; i++)
+            {
+                long hash = ComputeSpatialHash(ballisticApsides[i], TIME_BUCKET, POS_BUCKET);
+                if (!spatialHash.ContainsKey(hash))
+                    spatialHash[hash] = new List<int>();
+                spatialHash[hash].Add(i);
+            }
+
+            // Check maneuver apsides against nearby ballistic apsides only
             for (int i = maneuverApsides.Count - 1; i >= 0; i--)
             {
                 var maneuverApsis = maneuverApsides[i];
+                long baseHash = ComputeSpatialHash(maneuverApsis, TIME_BUCKET, POS_BUCKET);
                 
-                foreach (var ballisticApsis in ballisticApsides)
+                bool isDuplicate = false;
+                
+                // Check current bucket and 26 neighboring buckets (3x3x3 - 1)
+                for (int dt = -1; dt <= 1 && !isDuplicate; dt++)
                 {
-                    // Only compare same type (Pe with Pe, Ap with Ap)
-                    if (maneuverApsis.type != ballisticApsis.type)
-                        continue;
-
-                    double timeDiff = Math.Abs(maneuverApsis.timeToReach - ballisticApsis.timeToReach);
-                    double positionDiff = (maneuverApsis.worldPosition - ballisticApsis.worldPosition).Magnitude;
-
-                    // If maneuver apsis is very close to ballistic apsis, hide it
-                    if (timeDiff < TIME_THRESHOLD && positionDiff < POSITION_THRESHOLD)
+                    for (int dx = -1; dx <= 1 && !isDuplicate; dx++)
                     {
-                        maneuverApsides.RemoveAt(i);
-                        break;
+                        for (int dy = -1; dy <= 1 && !isDuplicate; dy++)
+                        {
+                            // Compute neighbor hash
+                            long neighborHash = baseHash + dt + ((long)dx << 20) + ((long)dy << 40);
+                            
+                            if (spatialHash.TryGetValue(neighborHash, out var indices))
+                            {
+                                foreach (int idx in indices)
+                                {
+                                    var ballisticApsis = ballisticApsides[idx];
+                                    
+                                    // Only compare same type (Pe with Pe, Ap with Ap)
+                                    if (maneuverApsis.type != ballisticApsis.type)
+                                        continue;
+
+                                    double timeDiff = Math.Abs(maneuverApsis.timeToReach - ballisticApsis.timeToReach);
+                                    double posDiff = (maneuverApsis.worldPosition - ballisticApsis.worldPosition).Magnitude;
+
+                                    // If maneuver apsis is very close to ballistic apsis, mark as duplicate
+                                    if (timeDiff < TIME_THRESHOLD && posDiff < POSITION_THRESHOLD)
+                                    {
+                                        isDuplicate = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
+                
+                if (isDuplicate)
+                    maneuverApsides.RemoveAt(i);
             }
+        }
+
+        /// <summary>
+        /// Computes spatial hash for an apsis based on time and position.
+        /// Uses 3D bucketing: time, x-position, y-position.
+        /// </summary>
+        private long ComputeSpatialHash(ApsisData apsis, double timeBucket, double posBucket)
+        {
+            int timeHash = (int)(apsis.timeToReach / timeBucket);
+            int xHash = (int)(apsis.worldPosition.X / posBucket);
+            int yHash = (int)(apsis.worldPosition.Y / posBucket);
+            
+            // Combine hashes using bit shifting to avoid collisions
+            // timeHash in lower 20 bits, xHash in middle 20 bits, yHash in upper 20 bits
+            return timeHash + ((long)xHash << 20) + ((long)yHash << 40);
         }
 
         /// <summary>
@@ -336,6 +395,7 @@ namespace Galilego.Gameplay
 
         /// <summary>
         /// Calculates apsides for all maneuver segments.
+        /// OPTIMIZED: Uses Burst-compiled parallel jobs for batch processing.
         /// </summary>
         private List<ApsisData> CalculateManeuverApsides()
         {
@@ -347,10 +407,7 @@ namespace Galilego.Gameplay
             try
             {
                 // Get node count from ManeuverEvaluator's cached boundaries
-                // Each boundary represents a segment after a maneuver node
                 int nodeCount = 0;
-                
-                // Try to get segment count by checking boundaries
                 for (int i = 0; i < 100; i++) // Reasonable upper limit
                 {
                     if (maneuverEvaluator.TryGetSegmentBoundaryState(i, out _))
@@ -367,89 +424,122 @@ namespace Galilego.Gameplay
                 double radius = universeManager.GetCurrentCentralBodyRadius();
                 string bodyName = universeManager.ActiveReferenceFrame.ToString();
 
-                // Process each segment
+                // Allocate native arrays for batch processing
+                Unity.Collections.NativeArray<Unity.Mathematics.double3> positions = 
+                    new Unity.Collections.NativeArray<Unity.Mathematics.double3>(nodeCount, Unity.Collections.Allocator.TempJob);
+                Unity.Collections.NativeArray<Unity.Mathematics.double3> velocities = 
+                    new Unity.Collections.NativeArray<Unity.Mathematics.double3>(nodeCount, Unity.Collections.Allocator.TempJob);
+                Unity.Collections.NativeArray<double> mus = 
+                    new Unity.Collections.NativeArray<double>(nodeCount, Unity.Collections.Allocator.TempJob);
+                Unity.Collections.NativeArray<Core.OrbitalElementsData> elements = 
+                    new Unity.Collections.NativeArray<Core.OrbitalElementsData>(nodeCount, Unity.Collections.Allocator.TempJob);
+                Unity.Collections.NativeArray<double> segmentTimes = 
+                    new Unity.Collections.NativeArray<double>(nodeCount, Unity.Collections.Allocator.TempJob);
+                Unity.Collections.NativeArray<Simulation.ApsisResultPair> apsisResults = 
+                    new Unity.Collections.NativeArray<Simulation.ApsisResultPair>(nodeCount, Unity.Collections.Allocator.TempJob);
+
+                // Fill input arrays
+                int validCount = 0;
                 for (int i = 0; i < nodeCount; i++)
                 {
-                    // Get segment boundary state (post-Δv)
                     if (!maneuverEvaluator.TryGetSegmentBoundaryState(i, out var boundary))
                         continue;
 
-                    // Convert Unity.Mathematics.double3 to Vector3d
                     Vector3d simPos = new Vector3d(boundary.Position.x, boundary.Position.y, boundary.Position.z);
                     Vector3d simVel = new Vector3d(boundary.Velocity.x, boundary.Velocity.y, boundary.Velocity.z);
-                    double segmentStartTime = boundary.Time;
 
-                    // Validate state vectors
                     if (!simPos.IsFinite || !simVel.IsFinite)
                         continue;
 
-                    // Transform to astrodynamic frame
                     Vector3d astroPos = universeManager.ConvertSimulationToAstrodynamicFrame(simPos);
                     Vector3d astroVel = universeManager.ConvertSimulationToAstrodynamicFrame(simVel);
 
-                    // Calculate orbital elements
-                    var elements = OrbitalElements.FromState(astroPos, astroVel, mu);
+                    positions[validCount] = new Unity.Mathematics.double3(astroPos.X, astroPos.Y, astroPos.Z);
+                    velocities[validCount] = new Unity.Mathematics.double3(astroVel.X, astroVel.Y, astroVel.Z);
+                    mus[validCount] = mu;
+                    segmentTimes[validCount] = boundary.Time;
+                    validCount++;
+                }
 
-                    if (!elements.IsValid)
-                        continue;
-
-                    // Check for circular orbit
-                    if (elements.Eccentricity < circularOrbitThreshold)
-                        continue;
-
-                    // Get apsis positions
-                    if (!elements.TryGetApsisPositions(out Vector3d astroPe, out Vector3d astroAp))
-                        continue;
-
-                    // Transform back to simulation frame
-                    Vector3d simPe = universeManager.ConvertAstrodynamicToSimulationFrame(astroPe);
-                    Vector3d simAp = universeManager.ConvertAstrodynamicToSimulationFrame(astroAp);
-
-                    // Calculate time to apsides (relative to segment start)
-                    if (!elements.TryGetTimeToApsides(mu, out double timeToPe, out double timeToAp))
-                        continue;
-
-                    // Convert to absolute time
-                    double absPeTime = segmentStartTime + timeToPe;
-                    double absApTime = segmentStartTime + timeToAp;
-
-                    // Calculate altitudes
-                    double altPe = simPe.Magnitude - radius;
-                    double altAp = simAp.Magnitude - radius;
-
-                    // Create periapsis data
-                    var peData = new ApsisData(
-                        worldPosition: simPe,
-                        altitude: altPe,
-                        timeToReach: absPeTime,
-                        type: ApsisType.Periapsis,
-                        orbitType: OrbitType.Maneuver,
-                        segmentIndex: i,
-                        isVisible: true,
-                        centralBodyName: bodyName
-                    );
-
-                    ApplyVisibilityRules(ref peData);
-                    result.Add(peData);
-
-                    // Create apoapsis data (only for elliptical orbits)
-                    if (elements.Eccentricity < 1.0)
+                if (validCount > 0)
+                {
+                    // Step 1: Calculate orbital elements in parallel
+                    var elementsJobHandle = Core.OrbitalElements.CalculateBatch(
+                        positions, velocities, mus, elements);
+                    
+                    // Step 2: Calculate apsides in parallel (depends on elements)
+                    var apsisJob = new Simulation.ApsisCalculationJob
                     {
-                        var apData = new ApsisData(
-                            worldPosition: simAp,
-                            altitude: altAp,
-                            timeToReach: absApTime,
-                            type: ApsisType.Apoapsis,
-                            orbitType: OrbitType.Maneuver,
-                            segmentIndex: i,
-                            isVisible: true,
-                            centralBodyName: bodyName
-                        );
+                        Elements = elements,
+                        SegmentStartTimes = segmentTimes,
+                        Mu = mu,
+                        CentralBodyRadius = radius,
+                        CircularOrbitThreshold = circularOrbitThreshold,
+                        Results = apsisResults
+                    };
+                    
+                    int batchSize = Unity.Mathematics.math.max(1, validCount / (UnityEngine.SystemInfo.processorCount - 2));
+                    var apsisJobHandle = Unity.Jobs.IJobParallelForExtensions.Schedule(apsisJob, validCount, batchSize, elementsJobHandle);
+                    
+                    // Wait for completion
+                    apsisJobHandle.Complete();
 
-                        ApplyVisibilityRules(ref apData);
-                        result.Add(apData);
+                    // Process results
+                    for (int i = 0; i < validCount; i++)
+                    {
+                        var apsisResult = apsisResults[i];
+
+                        // Add periapsis if valid
+                        if (apsisResult.PeValid != 0)
+                        {
+                            Vector3d simPe = universeManager.ConvertAstrodynamicToSimulationFrame(
+                                new Vector3d(apsisResult.PePosition.x, apsisResult.PePosition.y, apsisResult.PePosition.z));
+
+                            var peData = new ApsisData(
+                                worldPosition: simPe,
+                                altitude: apsisResult.PeAltitude,
+                                timeToReach: apsisResult.PeTime,
+                                type: ApsisType.Periapsis,
+                                orbitType: OrbitType.Maneuver,
+                                segmentIndex: i,
+                                isVisible: true,
+                                centralBodyName: bodyName
+                            );
+
+                            ApplyVisibilityRules(ref peData);
+                            result.Add(peData);
+                        }
+
+                        // Add apoapsis if valid
+                        if (apsisResult.ApValid != 0)
+                        {
+                            Vector3d simAp = universeManager.ConvertAstrodynamicToSimulationFrame(
+                                new Vector3d(apsisResult.ApPosition.x, apsisResult.ApPosition.y, apsisResult.ApPosition.z));
+
+                            var apData = new ApsisData(
+                                worldPosition: simAp,
+                                altitude: apsisResult.ApAltitude,
+                                timeToReach: apsisResult.ApTime,
+                                type: ApsisType.Apoapsis,
+                                orbitType: OrbitType.Maneuver,
+                                segmentIndex: i,
+                                isVisible: true,
+                                centralBodyName: bodyName
+                            );
+
+                            ApplyVisibilityRules(ref apData);
+                            result.Add(apData);
+                        }
                     }
                 }
+
+                // Cleanup native arrays
+                positions.Dispose();
+                velocities.Dispose();
+                mus.Dispose();
+                elements.Dispose();
+                segmentTimes.Dispose();
+                apsisResults.Dispose();
             }
             catch (Exception ex)
             {
