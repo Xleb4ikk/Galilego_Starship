@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using UnityEngine;
 using Galilego.Core;
 using Galilego.Simulation;
@@ -126,6 +127,12 @@ namespace Galilego.Gameplay
         // Ballistic job (no maneuvers) needs its own boundary containers
         private NativeArray<SegmentBoundaryState> nativeBallisticBoundaries;
         private NativeReference<int> nativeBallisticBoundaryCount;
+
+        // Profiling
+        private NativeArray<long> nativeMvrProfileCounters;
+        private NativeArray<long> nativeBalProfileCounters;
+        private Stopwatch jobTimer = new Stopwatch();
+        private long lastJobTicks;
 
         private Vector3[] ballisticPositions;
         private double[] ballisticTimesData;
@@ -724,6 +731,15 @@ namespace Galilego.Gameplay
             nativeCalcStatus.Value = 0;
             nativeBallisticCalcStatus.Value = 0;
 
+            // Allocate profile counters
+            nativeMvrProfileCounters = ResizeBuffer(nativeMvrProfileCounters, FullTrajectoryJob.PC_COUNT);
+            nativeBalProfileCounters = ResizeBuffer(nativeBalProfileCounters, FullTrajectoryJob.PC_COUNT);
+            for (int i = 0; i < FullTrajectoryJob.PC_COUNT; i++)
+            {
+                nativeMvrProfileCounters[i] = 0;
+                nativeBalProfileCounters[i] = 0;
+            }
+
             if (moonCount > 0)
             {
                 var moonJob = new MoonEphemerisJob
@@ -783,9 +799,11 @@ namespace Galilego.Gameplay
                 CalculationStatus = nativeBallisticCalcStatus,
 
                 SegmentBoundaries = nativeBallisticBoundaries,
-                SegmentBoundaryCount = nativeBallisticBoundaryCount
+                SegmentBoundaryCount = nativeBallisticBoundaryCount,
+                ProfileCounters = nativeBalProfileCounters
             };
 
+            jobTimer.Restart();
             ballisticJobHandle = ballisticTrajectoryJob.Schedule(ephemerisJobHandle);
 
             var trajectoryJob = new FullTrajectoryJob
@@ -821,7 +839,8 @@ namespace Galilego.Gameplay
                 CalculationStatus = nativeCalcStatus,
 
                 SegmentBoundaries = nativeBoundaries,
-                SegmentBoundaryCount = nativeBoundaryCount
+                SegmentBoundaryCount = nativeBoundaryCount,
+                ProfileCounters = nativeMvrProfileCounters
             };
 
             var maneuverHandle = trajectoryJob.Schedule(ephemerisJobHandle);
@@ -837,6 +856,9 @@ namespace Galilego.Gameplay
             if (!isJobRunning) return;
 
             trajectoryJobHandle.Complete();
+            jobTimer.Stop();
+            lastJobTicks = jobTimer.ElapsedTicks;
+            LogProfileData();
 
             // Read boundary states from job, mapping to global indices
             int boundaryCount = nativeBoundaryCount.IsCreated ? nativeBoundaryCount.Value : 0;
@@ -991,6 +1013,8 @@ namespace Galilego.Gameplay
             if (nativeBallisticCalcStatus.IsCreated) nativeBallisticCalcStatus.Dispose();
             if (nativeBallisticBoundaries.IsCreated) nativeBallisticBoundaries.Dispose();
             if (nativeBallisticBoundaryCount.IsCreated) nativeBallisticBoundaryCount.Dispose();
+            if (nativeMvrProfileCounters.IsCreated) nativeMvrProfileCounters.Dispose();
+            if (nativeBalProfileCounters.IsCreated) nativeBalProfileCounters.Dispose();
         }
 
         private void CompleteAndDisposeJobs()
@@ -1001,6 +1025,27 @@ namespace Galilego.Gameplay
             }
             DisposeJobResources();
             isJobRunning = false;
+        }
+
+        private void LogProfileData()
+        {
+            if (!nativeBalProfileCounters.IsCreated || !nativeMvrProfileCounters.IsCreated)
+                return;
+
+            long[] bal = new long[FullTrajectoryJob.PC_COUNT];
+            long[] mvr = new long[FullTrajectoryJob.PC_COUNT];
+            for (int i = 0; i < FullTrajectoryJob.PC_COUNT; i++)
+            {
+                bal[i] = nativeBalProfileCounters[i];
+                mvr[i] = nativeMvrProfileCounters[i];
+            }
+
+            double elapsedMs = (double)lastJobTicks / Stopwatch.Frequency * 1000.0;
+
+            UnityEngine.Debug.Log(
+                $"[FTJ] BAL: major={bal[0]} substeps={bal[1]} evalAccel={bal[2]} hermit={bal[3]} ephemSearch={bal[4]}\n" +
+                $"[FTJ] MVR: major={mvr[0]} substeps={mvr[1]} evalAccel={mvr[2]} hermit={mvr[3]} ephemSearch={mvr[4]}\n" +
+                $"[FTJ] TIMER: {elapsedMs:F1}ms (bal+maneuver combined)");
         }
 
         private bool TryUpdateFrameState(ref Vector3d framePos, ref Vector3d frameVel, double time)
