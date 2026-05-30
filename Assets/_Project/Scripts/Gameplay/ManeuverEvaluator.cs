@@ -57,6 +57,11 @@ namespace Galilego.Gameplay
         // ─── Moon prediction ────────────────────────────────────────────────────
         [Header("Moon Prediction")]
         [SerializeField] private int moonPredictionSamples = 64;
+        [SerializeField] private int moonPredictionSamplesPerOrbit = 96;
+
+        // Reusable arrays to avoid per-frame GC allocations in UpdateMoonPredictionVisuals
+        private double[] _moonSampleTimesCache = Array.Empty<double>();
+        private Vector3d[] _moonFramePosCache = Array.Empty<Vector3d>();
 
         private class MoonPredictionCache
         {
@@ -1496,7 +1501,37 @@ namespace Galilego.Gameplay
             EnsureMoonPredictionCaches(moonCount);
             bool show = universeManager.CameraMode == SpaceCameraMode.OrbitMap;
             ReferenceFrameTarget frame = universeManager.ActiveReferenceFrame;
-            int samples = Math.Max(2, moonPredictionSamples);
+            // ── Dynamic sample count ──────────────────────────────────────────────
+            double predictionSpan = endTime - simTime;
+            int samples;
+            {
+                const int kMaxSamples = 16384;
+                double shortestPeriod = double.PositiveInfinity;
+                var tmpOrbits = new MoonOrbitData[moonCount];
+                universeManager.FillMoonOrbitData(tmpOrbits, 0, moonCount, simTime);
+                for (int _i = 0; _i < moonCount; _i++)
+                {
+                    double _sma = tmpOrbits[_i].SemiMajorAxis;
+                    double _mu  = tmpOrbits[_i].GravitationalParameter;
+                    if (_sma > 0 && _mu > 0)
+                    {
+                        double _period = 2.0 * Math.PI * Math.Sqrt(_sma * _sma * _sma / _mu);
+                        if (_period > 1.0 && _period < shortestPeriod)
+                            shortestPeriod = _period;
+                    }
+                }
+                if (double.IsInfinity(shortestPeriod))
+                {
+                    samples = Math.Max(2, moonPredictionSamples);
+                }
+                else
+                {
+                    double orbitsInSpan = predictionSpan / shortestPeriod;
+                    int needed = (int)Math.Ceiling(orbitsInSpan * Math.Max(1, moonPredictionSamplesPerOrbit));
+                    samples = Math.Max(moonPredictionSamples, needed);
+                    samples = Math.Max(2, Math.Min(kMaxSamples, samples));
+                }
+            }
 
             // lineWidth and markerScale will be calculated per-line based on distance
             float markerScale = 0.4f; // default fallback
@@ -1504,8 +1539,14 @@ namespace Galilego.Gameplay
             // ── Precompute sample times and frame positions at each time ──────────
             // Same as spacecraft trajectory: each point uses framePos AT THAT TIME,
             // so (moonPos_t - framePos_t) creates realistic paths (loops etc.) in moving frames.
-            double[] sampleTimes = new double[samples];
-            Vector3d[] framePosAtTime = new Vector3d[samples];
+            // Use cached arrays to avoid per-frame GC pressure.
+            if (_moonSampleTimesCache.Length < samples)
+            {
+                _moonSampleTimesCache = new double[samples];
+                _moonFramePosCache    = new Vector3d[samples];
+            }
+            double[] sampleTimes    = _moonSampleTimesCache;
+            Vector3d[] framePosAtTime = _moonFramePosCache;
             for (int j = 0; j < samples; j++)
             {
                 sampleTimes[j] = simTime + (endTime - simTime) * (j / (double)(samples - 1));
