@@ -128,6 +128,13 @@ namespace Galilego.Gameplay
         private NativeArray<SegmentBoundaryState> nativeBallisticBoundaries;
         private NativeReference<int> nativeBallisticBoundaryCount;
 
+        // Checkpoints
+        private NativeArray<TrajectoryCheckpoint> nativeMvrCheckpoints;
+        private NativeArray<TrajectoryCheckpoint> nativeBalCheckpoints;
+        private NativeReference<int> nativeMvrCheckpointCount;
+        private NativeReference<int> nativeBalCheckpointCount;
+        private List<TrajectoryCheckpoint> cachedCheckpoints = new List<TrajectoryCheckpoint>();
+
         // Profiling
         private NativeArray<long> nativeMvrProfileCounters;
         private NativeArray<long> nativeBalProfileCounters;
@@ -584,17 +591,27 @@ namespace Galilego.Gameplay
                 }
             }
 
-            if (changedIdx <= 0) return;
+            if (changedIdx < 0) return;
 
-            // We have a cache hit — start from cachedBoundaries[changedIdx]
-            // which is state AFTER node[changedIdx-1]'s Δv
-            int boundaryIdx = Math.Min(changedIdx, cachedBoundaries.Count - 1);
-            var boundary = cachedBoundaries[boundaryIdx];
+            bool found = false;
+            TrajectoryCheckpoint bestCp = default;
+            for (int i = cachedCheckpoints.Count - 1; i >= 0; i--)
+            {
+                var cp = cachedCheckpoints[i];
+                if (cp.NodeVersion <= changedIdx)
+                {
+                    bestCp = cp;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) return;
+
             hasPartialCacheHit = true;
             partialStartSegment = changedIdx;
-            cachedPartialStartPos = boundary.Position;
-            cachedPartialStartVel = boundary.Velocity;
-            cachedPartialStartTime = boundary.Time;
+            cachedPartialStartPos = bestCp.Position;
+            cachedPartialStartVel = bestCp.Velocity;
+            cachedPartialStartTime = bestCp.Time;
         }
 
         private void TrimTrajectoryToBoundary()
@@ -619,6 +636,10 @@ namespace Galilego.Gameplay
                 fullTrajectoryTimes.RemoveRange(keepCount, fullTrajectoryTimes.Count - keepCount);
                 fullTrajectoryIsDashed.RemoveRange(keepCount, fullTrajectoryIsDashed.Count - keepCount);
             }
+
+            int keepCp = cachedCheckpoints.FindLastIndex(cp => cp.Time <= cachedPartialStartTime);
+            if (keepCp >= 0 && keepCp + 1 < cachedCheckpoints.Count)
+                cachedCheckpoints.RemoveRange(keepCp + 1, cachedCheckpoints.Count - keepCp - 1);
         }
 
         private NativeArray<T> ResizeBuffer<T>(NativeArray<T> existing, int requiredSize) where T : unmanaged
@@ -717,6 +738,14 @@ namespace Galilego.Gameplay
             if (!nativeBallisticPointCount.IsCreated) nativeBallisticPointCount = new NativeReference<int>(0, Allocator.Persistent);
             nativeBoundaries = ResizeBuffer(nativeBoundaries, nodeCount + 2);
             if (!nativeBoundaryCount.IsCreated) nativeBoundaryCount = new NativeReference<int>(0, Allocator.Persistent);
+
+            double checkpointInterval = 21600.0;
+            int maxCheckpoints = (int)(effectivePrediction / checkpointInterval) + nodeCount + 10;
+            maxCheckpoints = Math.Min(maxCheckpoints, 10000);
+            nativeMvrCheckpoints = ResizeBuffer(nativeMvrCheckpoints, maxCheckpoints);
+            nativeBalCheckpoints = ResizeBuffer(nativeBalCheckpoints, maxCheckpoints);
+            if (!nativeMvrCheckpointCount.IsCreated) nativeMvrCheckpointCount = new NativeReference<int>(0, Allocator.Persistent);
+            if (!nativeBalCheckpointCount.IsCreated) nativeBalCheckpointCount = new NativeReference<int>(0, Allocator.Persistent);
             if (!nativeCalcStatus.IsCreated) nativeCalcStatus = new NativeReference<int>(0, Allocator.Persistent);
             if (!nativeBallisticCalcStatus.IsCreated) nativeBallisticCalcStatus = new NativeReference<int>(0, Allocator.Persistent);
 
@@ -800,7 +829,11 @@ namespace Galilego.Gameplay
 
                 SegmentBoundaries = nativeBallisticBoundaries,
                 SegmentBoundaryCount = nativeBallisticBoundaryCount,
-                ProfileCounters = nativeBalProfileCounters
+                ProfileCounters = nativeBalProfileCounters,
+
+                CheckpointIntervalSeconds = 21600.0,
+                Checkpoints = nativeBalCheckpoints,
+                CheckpointCount = nativeBalCheckpointCount
             };
 
             jobTimer.Restart();
@@ -840,7 +873,11 @@ namespace Galilego.Gameplay
 
                 SegmentBoundaries = nativeBoundaries,
                 SegmentBoundaryCount = nativeBoundaryCount,
-                ProfileCounters = nativeMvrProfileCounters
+                ProfileCounters = nativeMvrProfileCounters,
+
+                CheckpointIntervalSeconds = 21600.0,
+                Checkpoints = nativeMvrCheckpoints,
+                CheckpointCount = nativeMvrCheckpointCount
             };
 
             var maneuverHandle = trajectoryJob.Schedule(ephemerisJobHandle);
@@ -859,6 +896,33 @@ namespace Galilego.Gameplay
             jobTimer.Stop();
             lastJobTicks = jobTimer.ElapsedTicks;
             LogProfileData();
+
+            // Read checkpoints from job — replace stale suffix, keep valid prefix
+            int cpCount = nativeMvrCheckpointCount.IsCreated ? nativeMvrCheckpointCount.Value : 0;
+            if (nativeMvrCheckpoints.IsCreated && cpCount > 0)
+            {
+                if (hasPartialCacheHit)
+                {
+                    // Remove checkpoints in the restarted region (NodeVersion >= partialStartSegment)
+                    int staleStart = cachedCheckpoints.FindIndex(cp => cp.NodeVersion >= partialStartSegment);
+                    if (staleStart >= 0)
+                        cachedCheckpoints.RemoveRange(staleStart, cachedCheckpoints.Count - staleStart);
+
+                    // Append new tail with offset NodeVersion
+                    for (int i = 0; i < cpCount && i < nativeMvrCheckpoints.Length; i++)
+                    {
+                        var cp = nativeMvrCheckpoints[i];
+                        cp.NodeVersion += partialStartSegment;
+                        cachedCheckpoints.Add(cp);
+                    }
+                }
+                else
+                {
+                    cachedCheckpoints.Clear();
+                    for (int i = 0; i < cpCount && i < nativeMvrCheckpoints.Length; i++)
+                        cachedCheckpoints.Add(nativeMvrCheckpoints[i]);
+                }
+            }
 
             // Read boundary states from job, mapping to global indices
             int boundaryCount = nativeBoundaryCount.IsCreated ? nativeBoundaryCount.Value : 0;
@@ -1015,6 +1079,10 @@ namespace Galilego.Gameplay
             if (nativeBallisticBoundaryCount.IsCreated) nativeBallisticBoundaryCount.Dispose();
             if (nativeMvrProfileCounters.IsCreated) nativeMvrProfileCounters.Dispose();
             if (nativeBalProfileCounters.IsCreated) nativeBalProfileCounters.Dispose();
+            if (nativeMvrCheckpoints.IsCreated) nativeMvrCheckpoints.Dispose();
+            if (nativeBalCheckpoints.IsCreated) nativeBalCheckpoints.Dispose();
+            if (nativeMvrCheckpointCount.IsCreated) nativeMvrCheckpointCount.Dispose();
+            if (nativeBalCheckpointCount.IsCreated) nativeBalCheckpointCount.Dispose();
         }
 
         private void CompleteAndDisposeJobs()

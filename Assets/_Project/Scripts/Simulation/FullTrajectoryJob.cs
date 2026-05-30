@@ -49,10 +49,16 @@ namespace Galilego.Simulation
 
         public NativeArray<long> ProfileCounters;
 
+        public double CheckpointIntervalSeconds;
+        [WriteOnly] public NativeArray<TrajectoryCheckpoint> Checkpoints;
+        public NativeReference<int> CheckpointCount;
+
         public void Execute()
         {
             int totalPoints = 0;
             int ephemIdx = 0;
+            int cpCount = 0;
+            double nextCheckpointTime = StartTime + CheckpointIntervalSeconds;
             int bCount = 0;
 
             double requestedPrediction = PredictionLengthSeconds > 0.0
@@ -84,6 +90,15 @@ namespace Galilego.Simulation
                     Time = currentTime
                 };
                 bCount = 1;
+            }
+
+            if (Checkpoints.IsCreated && Checkpoints.Length > 0)
+            {
+                Checkpoints[cpCount++] = new TrajectoryCheckpoint
+                {
+                    Position = currentPos, Velocity = currentVel,
+                    Time = currentTime, NodeVersion = 0
+                };
             }
 
             int nodeCount = Nodes.Length;
@@ -128,6 +143,15 @@ namespace Galilego.Simulation
                                 Position = currentPos,
                                 Velocity = currentVel,
                                 Time = currentTime
+                            };
+                        }
+
+                        if (Checkpoints.IsCreated && cpCount < Checkpoints.Length)
+                        {
+                            Checkpoints[cpCount++] = new TrajectoryCheckpoint
+                            {
+                                Position = currentPos, Velocity = currentVel,
+                                Time = currentTime, NodeVersion = seg + 1
                             };
                         }
                     }
@@ -210,6 +234,16 @@ namespace Galilego.Simulation
 
                     if (aborted) break;
 
+                    while (currentTime >= nextCheckpointTime && cpCount < Checkpoints.Length)
+                    {
+                        Checkpoints[cpCount++] = new TrajectoryCheckpoint
+                        {
+                            Position = currentPos, Velocity = currentVel,
+                            Time = currentTime, NodeVersion = seg
+                        };
+                        nextCheckpointTime += CheckpointIntervalSeconds;
+                    }
+
                     totalPoints = AddPoint(OutputPoints, totalPoints, MaxPoints,
                         currentPos, currentTime, isDashed);
 
@@ -245,11 +279,21 @@ namespace Galilego.Simulation
                             Time = currentTime
                         };
                     }
+
+                    if (Checkpoints.IsCreated && cpCount < Checkpoints.Length)
+                    {
+                        Checkpoints[cpCount++] = new TrajectoryCheckpoint
+                        {
+                            Position = currentPos, Velocity = currentVel,
+                            Time = currentTime, NodeVersion = seg + 1
+                        };
+                    }
                 }
 
                 if (totalPoints >= MaxPoints) break;
             }
 
+            if (CheckpointCount.IsCreated) CheckpointCount.Value = cpCount;
             PointCount.Value = totalPoints;
             CalculationStatus.Value = 1;
             if (SegmentBoundaryCount.IsCreated)

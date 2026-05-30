@@ -24,6 +24,8 @@ namespace Galilego.Tests.Editor
             var emptyEphemeris = new NativeArray<BodyState>(0, Allocator.TempJob);
             var emptyTimes = new NativeArray<double>(0, Allocator.TempJob);
             var emptyVelocities = new NativeArray<double3>(0, Allocator.TempJob);
+            var checkpoints = new NativeArray<TrajectoryCheckpoint>(0, Allocator.TempJob);
+            var checkpointCount = new NativeReference<int>(0, Allocator.TempJob);
 
             double jupiterSGP = 1.266865319e17;
 
@@ -58,7 +60,10 @@ namespace Galilego.Tests.Editor
                 CalculationStatus = calcStatus,
                 SegmentBoundaries = boundaries,
                 SegmentBoundaryCount = boundaryCount,
-                ProfileCounters = counters
+                ProfileCounters = counters,
+                CheckpointIntervalSeconds = 21600.0,
+                Checkpoints = checkpoints,
+                CheckpointCount = checkpointCount
             };
 
             job.Schedule().Complete();
@@ -93,6 +98,8 @@ namespace Galilego.Tests.Editor
             boundaries.Dispose();
             boundaryCount.Dispose();
             counters.Dispose();
+            checkpoints.Dispose();
+            checkpointCount.Dispose();
         }
     }
 }

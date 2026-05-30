@@ -87,6 +87,8 @@ namespace Galilego.Tests.Editor
             var boundaryCount = new NativeReference<int>(0, Allocator.TempJob);
             var emptyNodes = new NativeArray<ManeuverNodeData>(0, Allocator.TempJob);
             var counters = new NativeArray<long>(FullTrajectoryJob.PC_COUNT, Allocator.TempJob);
+            var checkpoints = new NativeArray<TrajectoryCheckpoint>(0, Allocator.TempJob);
+            var checkpointCount = new NativeReference<int>(0, Allocator.TempJob);
 
             // ── Compute ephemeris ────────────────────────────────────────────
             var moonJob = new MoonEphemerisJob
@@ -151,7 +153,10 @@ namespace Galilego.Tests.Editor
                 CalculationStatus = calcStatus,
                 SegmentBoundaries = boundaries,
                 SegmentBoundaryCount = boundaryCount,
-                ProfileCounters = counters
+                ProfileCounters = counters,
+                CheckpointIntervalSeconds = 21600.0,
+                Checkpoints = checkpoints,
+                CheckpointCount = checkpointCount
             };
 
             job.Schedule().Complete();
@@ -206,6 +211,8 @@ namespace Galilego.Tests.Editor
             boundaryCount.Dispose();
             emptyNodes.Dispose();
             counters.Dispose();
+            checkpoints.Dispose();
+            checkpointCount.Dispose();
         }
 
         [Test]
@@ -237,6 +244,8 @@ namespace Galilego.Tests.Editor
             var boundaryCount = new NativeReference<int>(0, Allocator.TempJob);
             var emptyNodes = new NativeArray<ManeuverNodeData>(0, Allocator.TempJob);
             var counters = new NativeArray<long>(FullTrajectoryJob.PC_COUNT, Allocator.TempJob);
+            var checkpoints = new NativeArray<TrajectoryCheckpoint>(0, Allocator.TempJob);
+            var checkpointCount = new NativeReference<int>(0, Allocator.TempJob);
 
             var moonJob = new MoonEphemerisJob
             {
@@ -285,7 +294,10 @@ namespace Galilego.Tests.Editor
                 OutputPoints = output, PointCount = pointCount,
                 CalculationStatus = calcStatus,
                 SegmentBoundaries = boundaries, SegmentBoundaryCount = boundaryCount,
-                ProfileCounters = counters
+                ProfileCounters = counters,
+                CheckpointIntervalSeconds = 21600.0,
+                Checkpoints = checkpoints,
+                CheckpointCount = checkpointCount
             };
 
             job.Schedule().Complete();
@@ -317,6 +329,8 @@ namespace Galilego.Tests.Editor
             boundaryCount.Dispose();
             emptyNodes.Dispose();
             counters.Dispose();
+            checkpoints.Dispose();
+            checkpointCount.Dispose();
         }
     }
 }
