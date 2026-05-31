@@ -63,6 +63,8 @@ namespace Galilego.Simulation
         public double3 Velocity;
         public double Time;
         public int NodeVersion;
+        public int EphemerisVersion;
+        public int EphemerisIndex;
     }
 
     [StructLayout(LayoutKind.Sequential)]

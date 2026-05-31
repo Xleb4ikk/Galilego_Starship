@@ -53,10 +53,27 @@ namespace Galilego.Simulation
         [WriteOnly] public NativeArray<TrajectoryCheckpoint> Checkpoints;
         public NativeReference<int> CheckpointCount;
 
+        public int HotNodeIndex;
+        public double HotCheckpointInterval;
+
+        // ─── State-based restart ─────────────────────────────────────
+        public int StartEphemerisIndex;   // -1 = с начала, >=0 = стартовый индекс эфемерид
+        public int EphemerisVersion;      // версия эфемерид для этого расчёта
+
+        // ─── Adaptive integrator settings ─────────────────────────────
+        public double RelTol;             // относительный tolerance (позиция+скорость)
+        public double AbsTol;             // абсолютный tolerance (метры)
+        public double MinStepSeconds;     // минимальный шаг
+        public double MaxStepSeconds;     // максимальный шаг в пустоте
+
+        // ─── Approximate body radii for event caps ────────────────────
+        public double JupiterRadius;
+        public double MoonRadius;
+
         public void Execute()
         {
             int totalPoints = 0;
-            int ephemIdx = 0;
+            int ephemIdx = StartEphemerisIndex >= 0 ? StartEphemerisIndex : 0;
             int cpCount = 0;
             double nextCheckpointTime = StartTime + CheckpointIntervalSeconds;
             int bCount = 0;
@@ -97,7 +114,9 @@ namespace Galilego.Simulation
                 Checkpoints[cpCount++] = new TrajectoryCheckpoint
                 {
                     Position = currentPos, Velocity = currentVel,
-                    Time = currentTime, NodeVersion = 0
+                    Time = currentTime, NodeVersion = 0,
+                    EphemerisVersion = EphemerisVersion,
+                    EphemerisIndex = ephemIdx
                 };
             }
 
@@ -173,9 +192,14 @@ namespace Galilego.Simulation
 
                 if (totalPoints >= MaxPoints) break;
 
+                // Hot zone: denser checkpoint interval around active edit
+                if (HotNodeIndex >= 0 && seg == HotNodeIndex)
+                    nextCheckpointTime = currentTime + HotCheckpointInterval;
+
                 bool trajectoryLimit = false;
                 int iterCount = 0;
                 int safetyCounter = 0;
+                double dt = math.min(MaxStepSeconds, targetTime - currentTime);
 
                 while (currentTime < targetTime && !trajectoryLimit)
                 {
@@ -188,58 +212,36 @@ namespace Galilego.Simulation
                         break;
                     }
 
-                    // Prepare body positions for step sizing (reused by first substep)
-                    var stepData = PrepareSubstepData(currentTime, currentPos, ref ephemIdx);
-
-                    // Adaptive step from SubstepData (min distance to any body)
-                    const double referenceDistance = 1e8;
-                    double adaptiveFactor = math.clamp(
-                        stepData.MinDistToAnyBody / referenceDistance, 0.1, 10.0);
-                    double adaptiveMajorStep = majorStep * adaptiveFactor;
-                    double stepTime = math.min(adaptiveMajorStep, targetTime - currentTime);
-                    if (stepTime <= 0.0) break;
-
-                    int internalSteps = CalculateAdaptiveSubsteps(stepTime, substepLimit);
-                    internalSteps = math.min(internalSteps, MaxSubstepsPerSegment);
-                    double internalDt = stepTime / internalSteps;
-
-                    bool aborted = false;
-                    for (int k = 0; k < internalSteps; k++)
+                    if (safetyCounter++ > MaxStepsPerSegment)
                     {
-                        if (ProfileCounters.IsCreated) ProfileCounters[PC_SUBSTEPS]++;
-                        safetyCounter++;
-                        if (safetyCounter > MaxStepsPerSegment)
-                        {
-                            trajectoryLimit = true;
-                            aborted = true;
-                            break;
-                        }
-
-                        // Fresh cache per substep (moon positions advance)
-                        if (k > 0)
-                            stepData = PrepareSubstepData(currentTime, currentPos, ref ephemIdx);
-
-                        var res = RK4Step(currentPos, currentVel, internalDt, ref stepData);
-                        currentPos = res.Position;
-                        currentVel = res.Velocity;
-                        currentTime += internalDt;
-
-                        if (!IsFinite(currentPos) || !IsFinite(currentVel))
-                        {
-                            trajectoryLimit = true;
-                            aborted = true;
-                            break;
-                        }
+                        trajectoryLimit = true;
+                        break;
                     }
 
-                    if (aborted) break;
+                    // Single adaptive step with error control
+                    bool stepAccepted = TryAdvanceStep(
+                        ref currentPos, ref currentVel, ref currentTime,
+                        targetTime, ref ephemIdx,
+                        ref dt);
 
+                    if (!IsFinite(currentPos) || !IsFinite(currentVel))
+                    {
+                        trajectoryLimit = true;
+                        break;
+                    }
+
+                    // Only record points after accepted steps
+                    if (!stepAccepted) continue;
+
+                    // Checkpoint recording
                     while (currentTime >= nextCheckpointTime && cpCount < Checkpoints.Length)
                     {
                         Checkpoints[cpCount++] = new TrajectoryCheckpoint
                         {
                             Position = currentPos, Velocity = currentVel,
-                            Time = currentTime, NodeVersion = seg
+                            Time = currentTime, NodeVersion = seg,
+                            EphemerisVersion = EphemerisVersion,
+                            EphemerisIndex = ephemIdx
                         };
                         nextCheckpointTime += CheckpointIntervalSeconds;
                     }
@@ -285,7 +287,9 @@ namespace Galilego.Simulation
                         Checkpoints[cpCount++] = new TrajectoryCheckpoint
                         {
                             Position = currentPos, Velocity = currentVel,
-                            Time = currentTime, NodeVersion = seg + 1
+                            Time = currentTime, NodeVersion = seg + 1,
+                            EphemerisVersion = EphemerisVersion,
+                            EphemerisIndex = ephemIdx
                         };
                     }
                 }
@@ -298,6 +302,193 @@ namespace Galilego.Simulation
             CalculationStatus.Value = 1;
             if (SegmentBoundaryCount.IsCreated)
                 SegmentBoundaryCount.Value = bCount;
+        }
+
+        // ─── Dormand–Prince 5(4) step ─────────────────────────────────
+        /// <summary>
+        /// Выполняет один шаг Dormand–Prince 5(4) с контролем ошибки.
+        /// Возвращает результат 5-го порядка и оценки ошибок по позиции и скорости.
+        /// </summary>
+        private IntegrationResult DoPri5Step(
+            double3 pos, double3 vel, double dt,
+            ref SubstepData data,
+            out double errPos, out double errVel)
+        {
+            if (ProfileCounters.IsCreated) ProfileCounters[PC_EVAL_ACCEL] += 7;
+
+            // Dormand–Prince 5(4) coefficients (Butcher tableau)
+            // 7 stages, FSAL = false (we don't reuse last evaluation)
+            const double a21 = 1.0 / 5.0;
+            const double a31 = 3.0 / 40.0;
+            const double a32 = 9.0 / 40.0;
+            const double a41 = 44.0 / 45.0;
+            const double a42 = -56.0 / 15.0;
+            const double a43 = 32.0 / 9.0;
+            const double a51 = 19372.0 / 6561.0;
+            const double a52 = -25360.0 / 2187.0;
+            const double a53 = 64448.0 / 6561.0;
+            const double a54 = -212.0 / 729.0;
+            const double a61 = 9017.0 / 3168.0;
+            const double a62 = -355.0 / 33.0;
+            const double a63 = 46732.0 / 5247.0;
+            const double a64 = 49.0 / 176.0;
+            const double a65 = -5103.0 / 18656.0;
+            const double a71 = 35.0 / 384.0;
+            const double a73 = 500.0 / 1113.0;
+            const double a74 = 125.0 / 192.0;
+            const double a75 = -2187.0 / 6784.0;
+            const double a76 = 11.0 / 84.0;
+
+            // Stage evaluations
+            double3 k1v = EvaluateAccelerationCached(pos, ref data);
+            double3 k1p = vel;
+
+            double3 pos2 = pos + k1p * (dt * a21);
+            double3 vel2 = vel + k1v * (dt * a21);
+            double3 a2 = EvaluateAccelerationCached(pos2, ref data);
+
+            double3 pos3 = pos + (k1p * (dt * a31) + vel2 * (dt * a32));
+            double3 vel3 = vel + (k1v * (dt * a31) + a2 * (dt * a32));
+            double3 a3 = EvaluateAccelerationCached(pos3, ref data);
+
+            double3 pos4 = pos + (k1p * (dt * a41) + vel2 * (dt * a42) + vel3 * (dt * a43));
+            double3 vel4 = vel + (k1v * (dt * a41) + a2 * (dt * a42) + a3 * (dt * a43));
+            double3 a4 = EvaluateAccelerationCached(pos4, ref data);
+
+            double3 pos5 = pos + (k1p * (dt * a51) + vel2 * (dt * a52) + vel3 * (dt * a53) + vel4 * (dt * a54));
+            double3 vel5 = vel + (k1v * (dt * a51) + a2 * (dt * a52) + a3 * (dt * a53) + a4 * (dt * a54));
+            double3 a5 = EvaluateAccelerationCached(pos5, ref data);
+
+            double3 pos6 = pos + (k1p * (dt * a61) + vel2 * (dt * a62) + vel3 * (dt * a63) + vel4 * (dt * a64) + vel5 * (dt * a65));
+            double3 vel6 = vel + (k1v * (dt * a61) + a2 * (dt * a62) + a3 * (dt * a63) + a4 * (dt * a64) + a5 * (dt * a65));
+            double3 a6 = EvaluateAccelerationCached(pos6, ref data);
+
+            double3 pos7 = pos + (k1p * (dt * a71) + vel3 * (dt * a73) + vel4 * (dt * a74) + vel5 * (dt * a75) + vel6 * (dt * a76));
+            double3 vel7 = vel + (k1v * (dt * a71) + a3 * (dt * a73) + a4 * (dt * a74) + a5 * (dt * a75) + a6 * (dt * a76));
+            double3 a7 = EvaluateAccelerationCached(pos7, ref data);
+
+            // 5th order weights (using b_i coefficients)
+            const double b1 = 35.0 / 384.0;
+            const double b3 = 500.0 / 1113.0;
+            const double b4 = 125.0 / 192.0;
+            const double b5 = -2187.0 / 6784.0;
+            const double b6 = 11.0 / 84.0;
+
+            double3 fifthPos = pos + (k1p * (dt * b1) + vel3 * (dt * b3) + vel4 * (dt * b4) + vel5 * (dt * b5) + vel6 * (dt * b6));
+            double3 fifthVel = vel + (k1v * (dt * b1) + a3 * (dt * b3) + a4 * (dt * b4) + a5 * (dt * b5) + a6 * (dt * b6));
+
+            // 4th order weights (for error estimation)
+            const double bs1 = 5179.0 / 57600.0;
+            const double bs3 = 7571.0 / 16695.0;
+            const double bs4 = 393.0 / 640.0;
+            const double bs5 = -92097.0 / 339200.0;
+            const double bs6 = 187.0 / 2100.0;
+            const double bs7 = 1.0 / 40.0;
+
+            double3 fourthPos = pos + (k1p * (dt * bs1) + vel3 * (dt * bs3) + vel4 * (dt * bs4) + vel5 * (dt * bs5) + vel6 * (dt * bs6) + vel7 * (dt * bs7));
+            double3 fourthVel = vel + (k1v * (dt * bs1) + a3 * (dt * bs3) + a4 * (dt * bs4) + a5 * (dt * bs5) + a6 * (dt * bs6) + a7 * (dt * bs7));
+
+            // Error = difference between 5th and 4th order
+            errPos = math.length(fifthPos - fourthPos);
+            errVel = math.length(fifthVel - fourthVel);
+
+            return new IntegrationResult { Position = fifthPos, Velocity = fifthVel };
+        }
+
+        // ─── Event-aware stepping caps ──────────────────────────────
+        /// <summary>
+        /// Вычисляет ограничения шага по геометрии, манёврам и границам сегментов.
+        /// </summary>
+        private double ComputeEventCaps(
+            double3 pos, double3 vel, double currentTime,
+            double targetTime, ref SubstepData data)
+        {
+            double dt = targetTime - currentTime;
+
+            // 1. Geometry: no more than 1/10 of time to closest approach
+            double minDist = data.MinDistToAnyBody;
+            double speed = math.length(vel);
+            double timeToClosest = minDist / math.max(speed, 0.1);
+            double dtGeom = timeToClosest * 0.1;
+
+            // 2. Sphere of influence: tighter step near bodies
+            if (JupiterRadius > 0.0 && minDist < JupiterRadius * 10.0)
+                dtGeom = math.min(dtGeom, 60.0);
+            if (MoonRadius > 0.0 && minDist < MoonRadius * 10.0)
+                dtGeom = math.min(dtGeom, 10.0);
+
+            // 3. Maneuver: within 1 hour before/after — step no larger than time to maneuver * 0.01
+            double dtManeuver = dt;
+            double timeToManeuver = targetTime - currentTime;
+            if (timeToManeuver > 0.0 && timeToManeuver < 3600.0)
+                dtManeuver = timeToManeuver * 0.01;
+
+            // 4. Segment boundary: don't overshoot targetTime
+            double dtRemaining = dt;
+
+            // Combine all caps
+            double capped = math.min(dtGeom, math.min(dtManeuver, dtRemaining));
+            return math.max(capped, MinStepSeconds);
+        }
+
+        // ─── Adaptive integrator (single step) ──────────────────────
+        /// <summary>
+        /// Делает один адаптивный шаг Dormand–Prince 5(4) с контролем ошибки
+        /// и event-aware caps. Возвращает false если шаг не принят (reject).
+        /// Не содержит цикл по времени — внешний цикл управляет итерациями.
+        /// </summary>
+        private bool TryAdvanceStep(
+            ref double3 pos, ref double3 vel, ref double time,
+            double targetTime, ref int ephemIdx,
+            ref double dt)
+        {
+            // Get fresh ephemeris data for current position/time
+            var stepData = PrepareSubstepData(time, pos, ref ephemIdx);
+
+            // Apply event-aware caps
+            double cappedDt = ComputeEventCaps(pos, vel, time, targetTime, ref stepData);
+            dt = math.min(dt, cappedDt);
+            if (time + dt > targetTime) dt = targetTime - time;
+
+            // DoPri5 step with error estimation
+            var result = DoPri5Step(pos, vel, dt, ref stepData, out double errPos, out double errVel);
+
+            // Scaled error
+            double scalePos = AbsTol + RelTol * math.max(math.length(pos), math.length(result.Position));
+            double scaleVel = AbsTol + RelTol * math.max(math.length(vel), math.length(result.Velocity));
+            double normalizedError = math.max(errPos / scalePos, errVel / scaleVel);
+
+            if (normalizedError <= 1.0)
+            {
+                // ACCEPT step
+                pos = result.Position;
+                vel = result.Velocity;
+                time += dt;
+
+                // Increase next step with safety factor
+                double stepScale = math.clamp(
+                    0.9 * math.pow(1.0 / math.max(normalizedError, 1e-10), 0.2),
+                    0.2, 5.0);
+                dt = math.clamp(dt * stepScale, MinStepSeconds, MaxStepSeconds);
+                return true;
+            }
+            else
+            {
+                // REJECT — retry with smaller step (Pi control formula)
+                double rejectScale = math.clamp(
+                    0.9 * math.pow(1.0 / math.max(normalizedError, 1e-10), 0.2),
+                    0.1, 0.5);
+                dt = math.max(dt * rejectScale, MinStepSeconds);
+                if (dt <= MinStepSeconds)
+                {
+                    // Force-accept at minimum step
+                    pos = result.Position;
+                    vel = result.Velocity;
+                    time += dt;
+                    return true;
+                }
+                return false;
+            }
         }
 
         private int AddPoint(NativeArray<TrajectoryPoint> points, int index, int max, double3 pos, double time, int isDashed)
@@ -392,31 +583,6 @@ namespace Galilego.Simulation
             return data;
         }
 
-        private IntegrationResult RK4Step(double3 pos, double3 vel, double dt, ref SubstepData data)
-        {
-            if (ProfileCounters.IsCreated) ProfileCounters[PC_EVAL_ACCEL] += 4;
-
-            double halfDt = dt * 0.5;
-            double sixthDt = dt / 6.0;
-
-            double3 k1Pos = vel;
-            double3 k1Vel = EvaluateAccelerationCached(pos, ref data);
-
-            double3 k2Pos = vel + k1Vel * halfDt;
-            double3 k2Vel = EvaluateAccelerationCached(pos + k1Pos * halfDt, ref data);
-
-            double3 k3Pos = vel + k2Vel * halfDt;
-            double3 k3Vel = EvaluateAccelerationCached(pos + k2Pos * halfDt, ref data);
-
-            double3 k4Pos = vel + k3Vel * dt;
-            double3 k4Vel = EvaluateAccelerationCached(pos + k3Pos * dt, ref data);
-
-            double3 newPos = pos + ((k1Pos + 2.0 * k2Pos + 2.0 * k3Pos + k4Pos) * sixthDt);
-            double3 newVel = vel + ((k1Vel + 2.0 * k2Vel + 2.0 * k3Vel + k4Vel) * sixthDt);
-
-            return new IntegrationResult { Position = newPos, Velocity = newVel };
-        }
-
         private double3 EvaluateAccelerationCached(double3 pos, ref SubstepData data)
         {
             double3 total = double3.zero;
@@ -490,12 +656,6 @@ namespace Galilego.Simulation
             OrbitalBasisJob.ComputeBasis(pos, vel, out double3 radial, out double3 normal, out double3 prograde);
 
             return prograde * node.DvPrograde + normal * node.DvNormal + radial * node.DvRadial;
-        }
-
-        private static int CalculateAdaptiveSubsteps(double majorStep, double baseSubstep)
-        {
-            double clamped = math.max(1e-9, math.min(baseSubstep, majorStep));
-            return math.max(1, (int)math.ceil(majorStep / clamped));
         }
 
         private static bool IsFinite(double3 v)

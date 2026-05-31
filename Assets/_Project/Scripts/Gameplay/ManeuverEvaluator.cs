@@ -38,6 +38,35 @@ namespace Galilego.Gameplay
         [SerializeField] private float debounceTime = 0.5f;
         [SerializeField] private int maxPointsPerLine = 512;
 
+        [Header("Adaptive Integrator")]
+        [SerializeField] private double integratorRelTol = 1e-8;
+        [SerializeField] private double integratorAbsTol = 1e-1;
+        [SerializeField] private double integratorMinStep = 0.1;
+        [SerializeField] private double integratorMaxStep = 600.0;
+        [SerializeField] private double integratorJupiterRadius = 7.0e7;
+        [SerializeField] private double integratorMoonRadius = 2.0e6;
+
+        // Tighter tolerances for close flyby / maneuver windows
+        private const double FlybyRelTol = 1e-10;
+        private const double FlybyAbsTol = 1e-2;
+        private const double FlybyMinStep = 0.001;
+        private const double FlybyMaxStep = 10.0;
+
+        private const double ManeuverRelTol = 1e-9;
+        private const double ManeuverAbsTol = 1e-3;
+        private const double ManeuverMinStep = 0.01;
+        private const double ManeuverMaxStep = 60.0;
+
+        [Header("LOD Settings")]
+        [SerializeField] private double lodNearTime = 86400.0;          // 24 часа
+        [SerializeField] private double lodMidTime = 2592000.0;         // 30 дней
+        [SerializeField] private double lodErrorTolerance = 0.01f;      // макс отклонение полилинии (Unity units)
+
+        // Временные буферы для LOD
+        private Vector3[] _lodPoints;
+        private double[] _lodTimes;
+        private bool[] _lodIsDashed;
+
         private List<Vector3d> fullTrajectoryPoints = new List<Vector3d>();
         private List<double> fullTrajectoryTimes = new List<double>();
         private List<bool> fullTrajectoryIsDashed = new List<bool>();
@@ -108,6 +137,7 @@ namespace Galilego.Gameplay
         private double3 cachedPartialStartPos;
         private double3 cachedPartialStartVel;
         private double cachedPartialStartTime;
+        private int cachedPartialStartVersion;
 
         private NativeArray<MoonOrbitData> nativeMoonOrbits;
         private NativeArray<ManeuverNodeData> nativeNodeData;
@@ -134,12 +164,24 @@ namespace Galilego.Gameplay
         private NativeReference<int> nativeMvrCheckpointCount;
         private NativeReference<int> nativeBalCheckpointCount;
         private List<TrajectoryCheckpoint> cachedCheckpoints = new List<TrajectoryCheckpoint>();
+        private int cacheEpoch = 0;
+        private int cachedPartialEpoch = -1;
+
+        // Ballistic visual cache
+        private List<Vector3d> cachedBallisticPoints = new List<Vector3d>();
+        private List<double> cachedBallisticTimes = new List<double>();
 
         // Profiling
         private NativeArray<long> nativeMvrProfileCounters;
         private NativeArray<long> nativeBalProfileCounters;
         private Stopwatch jobTimer = new Stopwatch();
         private long lastJobTicks;
+
+        // ─── Ephemeris version for checkpoint validation ──────────────
+        private int _ephemerisRevision = 0;
+        private int _cachedEphemerisRevision = -1;
+        private int _cachedPartialEphemerisRevision = -1;
+        private int _cachedPartialEphemerisIndex = -1;
 
         private Vector3[] ballisticPositions;
         private double[] ballisticTimesData;
@@ -429,8 +471,35 @@ namespace Galilego.Gameplay
             isDirty = true;
         }
 
+        private void InvalidateCache()
+        {
+            cacheEpoch++;
+            cachedPartialEpoch = -1;
+            hasPartialCacheHit = false;
+            cachedCheckpoints.Clear();
+            cachedBoundaries.Clear();
+            cachedBallisticPoints.Clear();
+            cachedBallisticTimes.Clear();
+            cachedStartPos = null;
+            cachedStartVel = null;
+            cachedStartTime = null;
+            cachedPredictionLength = null;
+            cachedNodeData.Clear();
+            _cachedEphemerisRevision = -1;
+        }
+
+        /// <summary>
+        /// Вызывать при любом изменении орбит луны, источника эфемерид или таблиц.
+        /// Увеличивает ревизию, что делает все старые чекпоинты невалидными.
+        /// </summary>
+        public void InvalidateEphemerisRevision()
+        {
+            _ephemerisRevision++;
+        }
+
         private void HandleActiveReferenceFrameChanged(ReferenceFrameTarget _)
         {
+            InvalidateCache();
             MarkAsDirty();
         }
 
@@ -485,6 +554,7 @@ namespace Galilego.Gameplay
                 : defaultPredictionLengthSeconds;
 
             cachedReferenceFrame = lockedReferenceFrame;
+            cachedPartialEpoch = cacheEpoch;
 
             cachedNodeData.Clear();
             for (int i = 0; i < flightPlan.Nodes.Count; i++)
@@ -520,6 +590,7 @@ namespace Galilego.Gameplay
 
             // Try partial recalc: only recompute affected suffix of trajectory
             hasPartialCacheHit = false;
+            _cachedEphemerisRevision = _ephemerisRevision;
             TryFindPartialRestartPoint();
 
             CompleteAndDisposeJobs();
@@ -530,12 +601,15 @@ namespace Galilego.Gameplay
             if (hasPartialCacheHit)
             {
                 TrimTrajectoryToBoundary();
+                TrimBallisticToBoundary();
             }
             else
             {
                 fullTrajectoryPoints.Clear();
                 fullTrajectoryTimes.Clear();
                 fullTrajectoryIsDashed.Clear();
+                cachedBallisticPoints.Clear();
+                cachedBallisticTimes.Clear();
             }
 
             lockedReferenceFrame = universeManager.ActiveReferenceFrame;
@@ -551,6 +625,9 @@ namespace Galilego.Gameplay
         private void TryFindPartialRestartPoint()
         {
             hasPartialCacheHit = false;
+
+            // Epoch mismatch means cache was globally invalidated (e.g. reference frame change)
+            if (cacheEpoch != cachedPartialEpoch) return;
 
             if (cachedBoundaries.Count == 0) return;
 
@@ -607,11 +684,18 @@ namespace Galilego.Gameplay
             }
             if (!found) return;
 
+            // Validate checkpoint versions against current state
+            if (bestCp.NodeVersion > changedIdx) return;          // node version mismatch (older version is fine)
+            if (bestCp.EphemerisVersion != _cachedEphemerisRevision) return; // ephemeris version mismatch
+
             hasPartialCacheHit = true;
             partialStartSegment = changedIdx;
             cachedPartialStartPos = bestCp.Position;
             cachedPartialStartVel = bestCp.Velocity;
             cachedPartialStartTime = bestCp.Time;
+            cachedPartialStartVersion = bestCp.NodeVersion;
+            _cachedPartialEphemerisRevision = bestCp.EphemerisVersion;
+            _cachedPartialEphemerisIndex = bestCp.EphemerisIndex;
         }
 
         private void TrimTrajectoryToBoundary()
@@ -642,6 +726,27 @@ namespace Galilego.Gameplay
                 cachedCheckpoints.RemoveRange(keepCp + 1, cachedCheckpoints.Count - keepCp - 1);
         }
 
+        private void TrimBallisticToBoundary()
+        {
+            if (cachedBallisticPoints.Count == 0) return;
+            double boundaryTime = cachedPartialStartTime;
+            int trimIdx = -1;
+            for (int i = 0; i < cachedBallisticTimes.Count; i++)
+            {
+                if (cachedBallisticTimes[i] >= boundaryTime - 0.5 && cachedBallisticTimes[i] <= boundaryTime + 0.5)
+                {
+                    trimIdx = i;
+                    break;
+                }
+            }
+            if (trimIdx >= 0 && trimIdx + 1 < cachedBallisticPoints.Count)
+            {
+                int keepCount = trimIdx;
+                cachedBallisticPoints.RemoveRange(keepCount, cachedBallisticPoints.Count - keepCount);
+                cachedBallisticTimes.RemoveRange(keepCount, cachedBallisticTimes.Count - keepCount);
+            }
+        }
+
         private NativeArray<T> ResizeBuffer<T>(NativeArray<T> existing, int requiredSize) where T : unmanaged
         {
             if (existing.IsCreated && existing.Length >= requiredSize)
@@ -649,6 +754,149 @@ namespace Galilego.Gameplay
             if (existing.IsCreated)
                 existing.Dispose();
             return new NativeArray<T>(requiredSize, Allocator.Persistent);
+        }
+
+        // ─── LOD: Ramer–Douglas–Peucker (индексная версия, без копирования) ────
+        /// <summary>
+        /// Упрощает полилинию через RDP, работая по индексам [start..end].
+        /// Записывает результат в dst начиная с dstStartIdx.
+        /// Возвращает количество записанных точек.
+        /// </summary>
+        private int SimplifyLineRDP(
+            Vector3[] srcPoints, double[] srcTimes, bool[] srcIsDashed,
+            int start, int end, double errorTol,
+            Vector3[] dstPoints, double[] dstTimes, bool[] dstIsDashed,
+            int dstStartIdx)
+        {
+            int count = end - start + 1;
+            if (count <= 2)
+            {
+                for (int i = 0; i < count; i++)
+                {
+                    dstPoints[dstStartIdx + i] = srcPoints[start + i];
+                    dstTimes[dstStartIdx + i] = srcTimes[start + i];
+                    dstIsDashed[dstStartIdx + i] = srcIsDashed[start + i];
+                }
+                return count;
+            }
+
+            // Найти точку с максимальным отклонением от линии (start..end)
+            double maxDist = 0.0;
+            int maxIdx = start;
+            Vector3 lineStart = srcPoints[start];
+            Vector3 lineEnd = srcPoints[end];
+            Vector3 lineDir = lineEnd - lineStart;
+            float lineLenSq = lineDir.sqrMagnitude;
+
+            for (int i = start + 1; i < end; i++)
+            {
+                double dist;
+                if (lineLenSq < 1e-12f)
+                {
+                    dist = (srcPoints[i] - lineStart).magnitude;
+                }
+                else
+                {
+                    Vector3 ap = srcPoints[i] - lineStart;
+                    float t = Vector3.Dot(ap, lineDir) / lineLenSq;
+                    t = Mathf.Clamp01(t);
+                    Vector3 proj = lineStart + lineDir * t;
+                    dist = (srcPoints[i] - proj).magnitude;
+                }
+
+                if (dist > maxDist)
+                {
+                    maxDist = dist;
+                    maxIdx = i;
+                }
+            }
+
+            if (maxDist <= (double)errorTol)
+            {
+                // Упростить: оставить только первую и последнюю
+                dstPoints[dstStartIdx] = lineStart;
+                dstTimes[dstStartIdx] = srcTimes[start];
+                dstIsDashed[dstStartIdx] = srcIsDashed[start];
+
+                dstPoints[dstStartIdx + 1] = lineEnd;
+                dstTimes[dstStartIdx + 1] = srcTimes[end];
+                dstIsDashed[dstStartIdx + 1] = srcIsDashed[end];
+                return 2;
+            }
+
+            // Разделить и рекурсивно упростить
+            int leftCount = SimplifyLineRDP(
+                srcPoints, srcTimes, srcIsDashed,
+                start, maxIdx, errorTol,
+                dstPoints, dstTimes, dstIsDashed,
+                dstStartIdx);
+
+            int rightCount = SimplifyLineRDP(
+                srcPoints, srcTimes, srcIsDashed,
+                maxIdx, end, errorTol,
+                dstPoints, dstTimes, dstIsDashed,
+                dstStartIdx + leftCount - 1); // -1 чтобы не дублировать maxIdx
+
+            return leftCount + rightCount - 1;
+        }
+
+        /// <summary>
+        /// Строит LOD-буфер из backBufferPoints с упрощением по ошибке.
+        /// Разбивает на временные окна: ближнее (точнее), среднее, дальнее (грубее).
+        /// </summary>
+        private int BuildLODBuffer(int srcStartIdx, int srcCount)
+        {
+            double simTime = universeManager.SimulationTimeSeconds;
+
+            // Убедиться, что буферы достаточного размера
+            if (_lodPoints == null || _lodPoints.Length < srcCount)
+                _lodPoints = new Vector3[srcCount];
+            if (_lodTimes == null || _lodTimes.Length < srcCount)
+                _lodTimes = new double[srcCount];
+            if (_lodIsDashed == null || _lodIsDashed.Length < srcCount)
+                _lodIsDashed = new bool[srcCount];
+
+            int lodTotal = 0;
+
+            // Разбить на окна: [start..end1), [end1..end2), [end2..end)
+            int nearEnd = srcStartIdx;
+            int midEnd = srcStartIdx;
+
+            // Найти границы по времени
+            for (int i = srcStartIdx; i < srcStartIdx + srcCount; i++)
+            {
+                double dt = backBufferTimes[i] - simTime;
+                if (dt <= lodNearTime)
+                    nearEnd = i;
+                if (dt <= lodMidTime)
+                    midEnd = i;
+            }
+            if (nearEnd <= srcStartIdx) nearEnd = srcStartIdx + 1;
+            if (midEnd <= nearEnd) midEnd = nearEnd + 1;
+            if (midEnd >= srcStartIdx + srcCount) midEnd = srcStartIdx + srcCount - 1;
+
+            // Ближнее окно: минимальный tolerance (точнее)
+            int nearCount = SimplifyLineRDP(
+                backBufferPoints, backBufferTimes, backBufferIsDashed,
+                srcStartIdx, nearEnd, lodErrorTolerance * 0.5,
+                _lodPoints, _lodTimes, _lodIsDashed, 0);
+            lodTotal = nearCount;
+
+            // Среднее окно: средний tolerance
+            int midCount = SimplifyLineRDP(
+                backBufferPoints, backBufferTimes, backBufferIsDashed,
+                nearEnd, midEnd, lodErrorTolerance,
+                _lodPoints, _lodTimes, _lodIsDashed, lodTotal - 1);
+            lodTotal += midCount - 1; // -1 чтобы не дублировать nearEnd
+
+            // Дальнее окно: больший tolerance
+            int farCount = SimplifyLineRDP(
+                backBufferPoints, backBufferTimes, backBufferIsDashed,
+                midEnd, srcStartIdx + srcCount - 1, lodErrorTolerance * 4.0,
+                _lodPoints, _lodTimes, _lodIsDashed, lodTotal - 1);
+            lodTotal += farCount - 1;
+
+            return lodTotal;
         }
 
         private void ScheduleJobs()
@@ -708,11 +956,15 @@ namespace Galilego.Gameplay
             int planeMapping = universeManager.CurrentPlaneMapping == AstrodynamicPlaneMapping.UnityXyPlaneZUp ? 0 : 1;
 
             int moonCount = universeManager.MoonRailCount;
+            MoonOrbitData[] tempOrbits = null;
+            if (moonCount > 0)
+            {
+                tempOrbits = new MoonOrbitData[moonCount];
+                universeManager.FillMoonOrbitData(tempOrbits, 0, moonCount, baseStartTime);
+            }
             nativeMoonOrbits = new NativeArray<MoonOrbitData>(moonCount, Allocator.Persistent);
             if (moonCount > 0)
             {
-                var tempOrbits = new MoonOrbitData[moonCount];
-                universeManager.FillMoonOrbitData(tempOrbits, 0, moonCount, baseStartTime);
                 for (int i = 0; i < moonCount; i++)
                     nativeMoonOrbits[i] = tempOrbits[i];
             }
@@ -795,6 +1047,54 @@ namespace Galilego.Gameplay
                 ephemerisJobHandle = default;
             }
 
+            // Choose integrator tolerances based on flight regime
+            double useRelTol = integratorRelTol;
+            double useAbsTol = integratorAbsTol;
+            double useMinStep = integratorMinStep;
+            double useMaxStep = integratorMaxStep;
+
+            // Check for close flyby: min distance to any body from ship start position
+            double3 shipPos = JobTypeConversion.ToDouble3(universeManager.ShipBody.Position);
+            double minDistToBody = math.length(shipPos - jupiterPos);
+            if (moonCount > 0)
+            {
+                // Rough check: use already-computed tempOrbits for moon positions at baseStartTime
+                for (int mi = 0; mi < moonCount; mi++)
+                {
+                    var orbit = tempOrbits[mi];
+                    double3 moonPos = AccelerationEvaluator.EvaluateMoonPosition(
+                        ref orbit, baseStartTime, planeMapping);
+                    double d = math.length(shipPos - moonPos);
+                    if (d < minDistToBody) minDistToBody = d;
+                }
+            }
+
+            // < 10 Jupiter radii → close flyby regime
+            if (minDistToBody < integratorJupiterRadius * 10.0)
+            {
+                useRelTol = FlybyRelTol;
+                useAbsTol = FlybyAbsTol;
+                useMinStep = FlybyMinStep;
+                useMaxStep = FlybyMaxStep;
+            }
+
+            // Check if any maneuver is within 1 hour from start → maneuver regime (overrides flyby)
+            for (int ni = 0; ni < flightPlan.Nodes.Count; ni++)
+            {
+                double timeToManeuver = flightPlan.Nodes[ni].StartTime - baseStartTime;
+                if (timeToManeuver > 0 && timeToManeuver < 3600.0)
+                {
+                    useRelTol = ManeuverRelTol;
+                    useAbsTol = ManeuverAbsTol;
+                    useMinStep = ManeuverMinStep;
+                    useMaxStep = ManeuverMaxStep;
+                    break;
+                }
+            }
+
+            int ephemerisVersion = _cachedEphemerisRevision;
+            int startEphemerisIndex = hasPartialCacheHit ? _cachedPartialEphemerisIndex : -1;
+
             var ballisticTrajectoryJob = new FullTrajectoryJob
             {
                 Nodes = nativeBallisticNodeData, // empty — no maneuvers, pure ballistic
@@ -833,7 +1133,21 @@ namespace Galilego.Gameplay
 
                 CheckpointIntervalSeconds = 21600.0,
                 Checkpoints = nativeBalCheckpoints,
-                CheckpointCount = nativeBalCheckpointCount
+                CheckpointCount = nativeBalCheckpointCount,
+                HotNodeIndex = hasPartialCacheHit ? partialStartSegment : -1,
+                HotCheckpointInterval = 60.0,
+
+                // State-based restart
+                StartEphemerisIndex = startEphemerisIndex,
+                EphemerisVersion = ephemerisVersion,
+
+                // Adaptive integrator settings (regime-aware)
+                RelTol = useRelTol,
+                AbsTol = useAbsTol,
+                MinStepSeconds = useMinStep,
+                MaxStepSeconds = useMaxStep,
+                JupiterRadius = integratorJupiterRadius,
+                MoonRadius = integratorMoonRadius
             };
 
             jobTimer.Restart();
@@ -877,7 +1191,21 @@ namespace Galilego.Gameplay
 
                 CheckpointIntervalSeconds = 21600.0,
                 Checkpoints = nativeMvrCheckpoints,
-                CheckpointCount = nativeMvrCheckpointCount
+                CheckpointCount = nativeMvrCheckpointCount,
+                HotNodeIndex = hasPartialCacheHit ? partialStartSegment : -1,
+                HotCheckpointInterval = 60.0,
+
+                // State-based restart
+                StartEphemerisIndex = startEphemerisIndex,
+                EphemerisVersion = ephemerisVersion,
+
+                // Adaptive integrator settings (regime-aware)
+                RelTol = useRelTol,
+                AbsTol = useAbsTol,
+                MinStepSeconds = useMinStep,
+                MaxStepSeconds = useMaxStep,
+                JupiterRadius = integratorJupiterRadius,
+                MoonRadius = integratorMoonRadius
             };
 
             var maneuverHandle = trajectoryJob.Schedule(ephemerisJobHandle);
@@ -1011,23 +1339,42 @@ namespace Galilego.Gameplay
                 CompleteBackBuffer(backBufferCount);
             }
 
-            // Process ballistic trajectory (no maneuvers) for the purple prediction line
+            // Process ballistic trajectory — append new suffix to cache
             int ballisticCountJob = nativeBallisticPointCount.IsCreated ? nativeBallisticPointCount.Value : 0;
             int ballisticStatus = nativeBallisticCalcStatus.IsCreated ? nativeBallisticCalcStatus.Value : 0;
             if (ballisticCountJob > 0 && ballisticStatus == 1 && nativeBallisticOutput.IsCreated)
             {
-                int bCount = Math.Min(ballisticCountJob, nativeBallisticOutput.Length);
+                int existingBallisticCount = cachedBallisticPoints.Count;
+
+                // Skip first new point if it duplicates last cached point
+                int newStartIdx = 0;
+                if (existingBallisticCount > 0 && ballisticCountJob > 0)
+                {
+                    double lastCachedTime = cachedBallisticTimes[existingBallisticCount - 1];
+                    double firstNewTime = nativeBallisticOutput[0].Time;
+                    if (Math.Abs(lastCachedTime - firstNewTime) < 0.5)
+                        newStartIdx = 1;
+                }
+
+                for (int i = newStartIdx; i < ballisticCountJob && i < nativeBallisticOutput.Length; i++)
+                {
+                    var pt = nativeBallisticOutput[i];
+                    Vector3d absPos = JobTypeConversion.ToVector3d(pt.Position);
+                    cachedBallisticPoints.Add(absPos);
+                    cachedBallisticTimes.Add(pt.Time);
+                }
+
+                // Build visual arrays from cache
+                int bCount = cachedBallisticPoints.Count;
                 ballisticPositions = new Vector3[bCount];
                 ballisticTimesData = new double[bCount];
                 Vector3d framePos = Vector3d.Zero, frameVel = Vector3d.Zero;
                 for (int i = 0; i < bCount; i++)
                 {
-                    var pt = nativeBallisticOutput[i];
-                    TryUpdateFrameState(ref framePos, ref frameVel, pt.Time);
-                    Vector3d absPos = JobTypeConversion.ToVector3d(pt.Position);
-                    Vector3d relPos = absPos - framePos;
+                    TryUpdateFrameState(ref framePos, ref frameVel, cachedBallisticTimes[i]);
+                    Vector3d relPos = cachedBallisticPoints[i] - framePos;
                     ballisticPositions[i] = universeManager.ToUnityOffset(relPos);
-                    ballisticTimesData[i] = pt.Time;
+                    ballisticTimesData[i] = cachedBallisticTimes[i];
                 }
                 ballisticCount = bCount;
                 UpdateBallisticLine();
@@ -1110,10 +1457,15 @@ namespace Galilego.Gameplay
 
             double elapsedMs = (double)lastJobTicks / Stopwatch.Frequency * 1000.0;
 
+            string partialTag = hasPartialCacheHit ? " [PARTIAL]" : "";
+            string cpInfo = hasPartialCacheHit
+                ? $" cpTime={cachedPartialStartTime:F1}s cpVer={cachedPartialStartVersion}"
+                : "";
+
             UnityEngine.Debug.Log(
-                $"[FTJ] BAL: major={bal[0]} substeps={bal[1]} evalAccel={bal[2]} hermit={bal[3]} ephemSearch={bal[4]}\n" +
-                $"[FTJ] MVR: major={mvr[0]} substeps={mvr[1]} evalAccel={mvr[2]} hermit={mvr[3]} ephemSearch={mvr[4]}\n" +
-                $"[FTJ] TIMER: {elapsedMs:F1}ms (bal+maneuver combined)");
+                $"[FTJ]{partialTag} BAL: major={bal[0]} substeps={bal[1]} evalAccel={bal[2]} hermit={bal[3]} ephemSearch={bal[4]}\n" +
+                $"[FTJ]{partialTag} MVR: major={mvr[0]} substeps={mvr[1]} evalAccel={mvr[2]} hermit={mvr[3]} ephemSearch={mvr[4]}\n" +
+                $"[FTJ]{partialTag} TIMER: {elapsedMs:F1}ms (bal+maneuver combined){cpInfo}");
         }
 
         private bool TryUpdateFrameState(ref Vector3d framePos, ref Vector3d frameVel, double time)
@@ -1136,6 +1488,7 @@ namespace Galilego.Gameplay
             backBufferCount = 0;
         }
 
+        // ─── LOD-интеграция в CompleteBackBuffer ──────────────────────
         private void CompleteBackBuffer(int count)
         {
             if (count == 0) return;
@@ -1158,17 +1511,24 @@ namespace Galilego.Gameplay
             lastClipStartIdx = startIdx;
             if (remainingCount < 2) return;
 
+            // Apply LOD simplification to reduce point count for rendering
+            int lodCount = BuildLODBuffer(startIdx, remainingCount);
+            if (lodCount < 2) return;
+
+            // Use LOD arrays for the rest of the pipeline
+            // We need to work with _lodPoints[0..lodCount] instead of backBufferPoints
+            // Build runs based on LOD data
             List<(int start, int end, bool isDashed)> runs = new List<(int, int, bool)>();
-            int runStart = startIdx;
-            for (int i = startIdx + 1; i < validCount; i++)
+            int runStart = 0;
+            for (int i = 1; i < lodCount; i++)
             {
-                if (backBufferIsDashed[i] != backBufferIsDashed[runStart])
+                if (_lodIsDashed[i] != _lodIsDashed[runStart])
                 {
-                    runs.Add((runStart, i - 1, backBufferIsDashed[runStart]));
+                    runs.Add((runStart, i - 1, _lodIsDashed[runStart]));
                     runStart = i;
                 }
             }
-            runs.Add((runStart, validCount - 1, backBufferIsDashed[runStart]));
+            runs.Add((runStart, lodCount - 1, _lodIsDashed[runStart]));
 
             int totalLines = 0;
             foreach (var run in runs)
@@ -1196,7 +1556,7 @@ namespace Galilego.Gameplay
 
                     for (int i = 0; i < pointsInLine; i++)
                     {
-                        positionsBuffer[i] = backBufferPoints[run.start + l * maxPointsPerLine + i];
+                        positionsBuffer[i] = _lodPoints[run.start + l * maxPointsPerLine + i];
                     }
 
                     line.SetPositions(positionsBuffer);
@@ -1428,6 +1788,8 @@ namespace Galilego.Gameplay
             }
             ballisticPositions = null;
             ballisticCount = 0;
+            cachedBallisticPoints.Clear();
+            cachedBallisticTimes.Clear();
         }
 
         private double ResolveSubstepLimitSeconds(double majorStepSeconds)
