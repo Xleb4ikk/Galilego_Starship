@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using UnityEngine;
 using Galilego.Core;
 using Galilego.Simulation;
@@ -193,6 +194,70 @@ namespace Galilego.Gameplay
         private int ballisticCount;
         private Vector3[] _ballisticClipBuffer = new Vector3[0];
 
+        // ═══════════════════════════════════════════════════════════════════════════
+        // REQUEST VERSIONING & PREVIEW SYSTEM
+        // ═══════════════════════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// Счётчик запросов. Инкрементируется при каждом изменении манёвра.
+        /// </summary>
+        private ulong _calculationRequestRevision = 0;
+
+        /// <summary>
+        /// Ревизия последнего успешно применённого точного результата.
+        /// </summary>
+        private ulong _lastAppliedRevision = 0;
+
+        /// <summary>
+        /// Ревизия текущего выполняющегося job.
+        /// </summary>
+        private ulong _runningJobRevision = 0;
+
+        /// <summary>
+        /// Состояние отображаемой траектории.
+        /// </summary>
+        private enum VisualizationState
+        {
+            Empty,           // Нет траектории
+            ShowingExact,    // Показываем точный результат
+            ShowingPreview,  // Показываем быстрый preview
+            Computing        // Идёт расчёт, показываем предыдущий результат
+        }
+
+        private VisualizationState _vizState = VisualizationState.Empty;
+
+        // Exact result buffer (последний точный результат)
+        private List<Vector3d> _exactTrajectoryPoints = new List<Vector3d>();
+        private List<double> _exactTrajectoryTimes = new List<double>();
+        private List<bool> _exactTrajectoryIsDashed = new List<bool>();
+
+        // Preview buffer (для быстрых интерполяций)
+        private List<Vector3d> _previewTrajectoryPoints = new List<Vector3d>();
+        private List<double> _previewTrajectoryTimes = new List<double>();
+        private List<bool> _previewTrajectoryIsDashed = new List<bool>();
+
+        // Параметры последнего exact result (база для интерполяции)
+        private struct ExactResultSnapshot
+        {
+            public double DvPrograde;
+            public double DvNormal;
+            public double DvRadial;
+            public int ManeuverIndex;
+            public double ManeuverTime;
+            public int TrajectoryPointIndex; // индекс точки манёвра в массиве
+            
+            public bool IsValid => ManeuverIndex >= 0;
+        }
+
+        // Храним snapshot для каждого манёвра
+        private Dictionary<int, ExactResultSnapshot> _exactSnapshots = new Dictionary<int, ExactResultSnapshot>();
+        
+        // Для обратной совместимости
+        private ExactResultSnapshot _lastExactSnapshot => _exactSnapshots.Count > 0 ? _exactSnapshots.Values.First() : default;
+
+        // Threshold: если Δv изменился больше этого значения, preview не создаём
+        private const double MAX_DV_DELTA_FOR_PREVIEW_MS = 500.0; // 500 m/s
+
         // ─── Moon prediction cache ──────────────────────────────────
         private double _cachedMoonEndTime = -1.0;
         private double _cachedMoonSimTime = -1.0;
@@ -266,7 +331,9 @@ namespace Galilego.Gameplay
             if (isDirty)
             {
                 dirtyTimer += Time.unscaledDeltaTime;
-                if (dirtyTimer >= debounceTime)
+                // При активном scrubbing пересчитываем немедленно без debounce
+                bool shouldRecalc = ScrubbingActive || dirtyTimer >= debounceTime;
+                if (shouldRecalc)
                 {
                     isDirty = false;
                     dirtyTimer = 0f;
@@ -500,6 +567,184 @@ namespace Galilego.Gameplay
             isDirty = true;
         }
 
+        // ═══════════════════════════════════════════════════════════════════════════
+        // INSTANT PREVIEW SYSTEM
+        // ═══════════════════════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// Запрос на мгновенное обновление preview при изменении Δv слайдером.
+        /// Вызывается БЕЗ debounce для немедленного визуального отклика.
+        /// </summary>
+        /// <param name="maneuverIndex">Индекс редактируемого манёвра</param>
+        /// <param name="dvPrograde">Новое значение Δv prograde (m/s)</param>
+        /// <param name="dvNormal">Новое значение Δv normal (m/s)</param>
+        /// <param name="dvRadial">Новое значение Δv radial (m/s)</param>
+        public void RequestInstantPreview(int maneuverIndex, double dvPrograde, double dvNormal, double dvRadial)
+        {
+            // Increment request counter
+            _calculationRequestRevision++;
+            
+            // Try to generate fast preview (currently disabled)
+            bool previewCreated = TryGenerateInstantPreview(maneuverIndex, dvPrograde, dvNormal, dvRadial);
+            
+            if (previewCreated)
+            {
+                _vizState = VisualizationState.ShowingPreview;
+            }
+            
+            // Always request exact recalculation (with debounce)
+            MarkAsDirtyLightweight();
+        }
+
+        /// <summary>
+        /// Попытка создать быстрый интерполированный preview траектории.
+        /// Возвращает true если preview успешно создан.
+        /// </summary>
+        private bool TryGenerateInstantPreview(int maneuverIndex, double dvPrograde, double dvNormal, double dvRadial)
+        {
+            // ВРЕМЕННО ОТКЛЮЧЕНО: preview интерполяция работает некорректно в вращающейся системе отсчёта
+            // Вместо этого просто оставляем текущую траекторию видимой до готовности exact result
+            return false;
+            
+            /* TODO: Реализовать корректную интерполяцию с учётом:
+             * 1. Вращающейся системы отсчёта (rotating reference frame)
+             * 2. Гравитационного влияния
+             * 3. Frame transformations
+             * 
+             * Пока просто используем версионирование для отбрасывания устаревших результатов
+             */
+        }
+
+        /// <summary>
+        /// Генерирует линейно интерполированный preview траектории.
+        /// ЭТО ГРУБОЕ ПРИБЛИЖЕНИЕ только для визуального сглаживания UI.
+        /// </summary>
+        private void GenerateLinearPreview(ExactResultSnapshot snapshot, double newDvPrograde, double newDvNormal, double newDvRadial, double dvDelta)
+        {
+            _previewTrajectoryPoints.Clear();
+            _previewTrajectoryTimes.Clear();
+            _previewTrajectoryIsDashed.Clear();
+            
+            int maneuverPtIdx = snapshot.TrajectoryPointIndex;
+            
+            if (maneuverPtIdx < 0 || maneuverPtIdx >= _exactTrajectoryPoints.Count)
+            {
+                // Fallback: копируем exact result без изменений
+                _previewTrajectoryPoints.AddRange(_exactTrajectoryPoints);
+                _previewTrajectoryTimes.AddRange(_exactTrajectoryTimes);
+                _previewTrajectoryIsDashed.AddRange(_exactTrajectoryIsDashed);
+                return;
+            }
+            
+            // Копируем точки ДО манёвра без изменений
+            for (int i = 0; i < maneuverPtIdx; i++)
+            {
+                _previewTrajectoryPoints.Add(_exactTrajectoryPoints[i]);
+                _previewTrajectoryTimes.Add(_exactTrajectoryTimes[i]);
+                _previewTrajectoryIsDashed.Add(_exactTrajectoryIsDashed[i]);
+            }
+            
+            // Вычисляем изменение Δv в мировых координатах
+            double dvDeltaPrograde = newDvPrograde - snapshot.DvPrograde;
+            double dvDeltaNormal = newDvNormal - snapshot.DvNormal;
+            double dvDeltaRadial = newDvRadial - snapshot.DvRadial;
+            
+            Vector3d dvWorldDelta = ComputeWorldDeltaVChange(maneuverPtIdx, 
+                dvDeltaPrograde, dvDeltaNormal, dvDeltaRadial);
+            
+            // Применяем линейную аппроксимацию к точкам ПОСЛЕ манёвра
+            double maneuverTime = _exactTrajectoryTimes[maneuverPtIdx];
+            
+            for (int i = maneuverPtIdx; i < _exactTrajectoryPoints.Count; i++)
+            {
+                double timeSinceManeuver = _exactTrajectoryTimes[i] - maneuverTime;
+                
+                // Простая формула: новая позиция ≈ старая позиция + deltaV * время
+                // (игнорируем гравитацию - это только визуальный preview)
+                Vector3d approximateOffset = dvWorldDelta * timeSinceManeuver;
+                
+                _previewTrajectoryPoints.Add(_exactTrajectoryPoints[i] + approximateOffset);
+                _previewTrajectoryTimes.Add(_exactTrajectoryTimes[i]);
+                _previewTrajectoryIsDashed.Add(_exactTrajectoryIsDashed[i]);
+            }
+        }
+
+        /// <summary>
+        /// Вычисляет изменение Δv в мировых координатах.
+        /// </summary>
+        private Vector3d ComputeWorldDeltaVChange(int trajectoryPointIdx, 
+            double dvDeltaPrograde, double dvDeltaNormal, double dvDeltaRadial)
+        {
+            if (trajectoryPointIdx < 0 || trajectoryPointIdx >= _exactTrajectoryPoints.Count)
+                return Vector3d.Zero;
+            
+            Vector3d position = _exactTrajectoryPoints[trajectoryPointIdx];
+            
+            // Вычисляем velocity из соседних точек (численная производная)
+            Vector3d velocity;
+            if (trajectoryPointIdx + 1 < _exactTrajectoryPoints.Count)
+            {
+                double dt = _exactTrajectoryTimes[trajectoryPointIdx + 1] - _exactTrajectoryTimes[trajectoryPointIdx];
+                if (dt > 0.01)
+                    velocity = (_exactTrajectoryPoints[trajectoryPointIdx + 1] - position) / dt;
+                else
+                    velocity = Vector3d.Zero;
+            }
+            else if (trajectoryPointIdx > 0)
+            {
+                double dt = _exactTrajectoryTimes[trajectoryPointIdx] - _exactTrajectoryTimes[trajectoryPointIdx - 1];
+                if (dt > 0.01)
+                    velocity = (position - _exactTrajectoryPoints[trajectoryPointIdx - 1]) / dt;
+                else
+                    velocity = Vector3d.Zero;
+            }
+            else
+            {
+                velocity = Vector3d.Zero;
+            }
+            
+            // Вычисляем орбитальный базис
+            if (!OrbitalBasis.TryComputeBasis(position, velocity, 
+                out Vector3d radial, out Vector3d normal, out Vector3d prograde))
+            {
+                return Vector3d.Zero;
+            }
+            
+            return prograde * dvDeltaPrograde + normal * dvDeltaNormal + radial * dvDeltaRadial;
+        }
+
+        /// <summary>
+        /// Применяет preview траекторию к визуализации (LineRenderer).
+        /// </summary>
+        private void ApplyPreviewToVisualization()
+        {
+            if (_previewTrajectoryPoints.Count == 0)
+                return;
+            
+            // Используем ту же логику рендеринга, что и для exact result
+            int totalPoints = _previewTrajectoryPoints.Count;
+            InitializeBackBuffer(totalPoints);
+            
+            Vector3d firstFramePos = Vector3d.Zero;
+            Vector3d firstFrameVel = Vector3d.Zero;
+            
+            for (int i = 0; i < totalPoints && i < backBufferPoints.Length; i++)
+            {
+                double ptTime = _previewTrajectoryTimes[i];
+                Vector3d absPos = _previewTrajectoryPoints[i];
+                
+                TryUpdateFrameState(ref firstFramePos, ref firstFrameVel, ptTime);
+                Vector3d relPos = absPos - firstFramePos;
+                
+                backBufferPoints[i] = universeManager.ToUnityOffset(relPos);
+                backBufferTimes[i] = ptTime;
+                backBufferIsDashed[i] = _previewTrajectoryIsDashed[i];
+            }
+            
+            backBufferCount = totalPoints;
+            CompleteBackBuffer(backBufferCount);
+        }
+
         private void InvalidateCache()
         {
             cacheEpoch++;
@@ -616,6 +861,10 @@ namespace Galilego.Gameplay
                 isDirty = false;
                 return;
             }
+
+            // ═══ NEW: Assign revision to this exact calculation request ═══
+            _runningJobRevision = _calculationRequestRevision;
+            _vizState = VisualizationState.Computing;
 
             // Try partial recalc: only recompute affected suffix of trajectory
             hasPartialCacheHit = false;
@@ -1249,6 +1498,29 @@ namespace Galilego.Gameplay
         {
             if (!isJobRunning) return;
 
+            // ═══ NEW: Check if this result is still relevant ═══
+            if (_runningJobRevision < _lastAppliedRevision)
+            {
+                // Этот job завершился, но его результат уже устарел
+                trajectoryJobHandle.Complete();
+                DisposeJobResources();
+                isJobRunning = false;
+                return;
+            }
+            
+            // При scrubbing принимаем любой результат, даже если пришёл более новый запрос
+            if (!ScrubbingActive && _runningJobRevision < _calculationRequestRevision)
+            {
+                // Пока job считался, пришёл новый запрос - результат устарел
+                trajectoryJobHandle.Complete();
+                DisposeJobResources();
+                isJobRunning = false;
+                return;
+            }
+            
+            // Job актуален (или scrubbing активен) - применяем результат
+            _lastAppliedRevision = _runningJobRevision;
+
             trajectoryJobHandle.Complete();
             jobTimer.Stop();
             lastJobTicks = jobTimer.ElapsedTicks;
@@ -1411,6 +1683,20 @@ namespace Galilego.Gameplay
 
             DisposeJobResources();
             isJobRunning = false;
+            
+            // ═══ NEW: Save exact result for future preview interpolation ═══
+            _exactTrajectoryPoints.Clear();
+            _exactTrajectoryPoints.AddRange(fullTrajectoryPoints);
+            _exactTrajectoryTimes.Clear();
+            _exactTrajectoryTimes.AddRange(fullTrajectoryTimes);
+            _exactTrajectoryIsDashed.Clear();
+            _exactTrajectoryIsDashed.AddRange(fullTrajectoryIsDashed);
+            
+            // Save snapshot of ALL maneuvers
+            CaptureExactResultSnapshot();
+            
+            _vizState = VisualizationState.ShowingExact;
+            
             // Cache last trajectory end point for marker during scrubbing
             hasCachedMarkerPos = fullTrajectoryPoints.Count > 0;
             if (hasCachedMarkerPos)
@@ -1419,6 +1705,56 @@ namespace Galilego.Gameplay
                 cachedMarkerTime = fullTrajectoryTimes[fullTrajectoryTimes.Count - 1];
             }
             UpdateVisibility();
+        }
+
+        /// <summary>
+        /// Захватывает параметры всех манёвров для будущих preview.
+        /// </summary>
+        private ExactResultSnapshot CaptureExactResultSnapshot()
+        {
+            if (flightPlan == null || flightPlan.Nodes.Count == 0)
+                return default;
+            
+            // Сохраняем snapshot для ВСЕХ манёвров
+            _exactSnapshots.Clear();
+            
+            for (int i = 0; i < flightPlan.Nodes.Count; i++)
+            {
+                var node = flightPlan.Nodes[i];
+                
+                // Находим индекс точки манёвра в траектории
+                int trajectoryIdx = FindTrajectoryPointNearTime(node.StartTime);
+                
+                var snapshot = new ExactResultSnapshot
+                {
+                    DvPrograde = node.DvPrograde,
+                    DvNormal = node.DvNormal,
+                    DvRadial = node.DvRadial,
+                    ManeuverIndex = i,
+                    ManeuverTime = node.StartTime,
+                    TrajectoryPointIndex = trajectoryIdx
+                };
+                
+                _exactSnapshots[i] = snapshot;
+            }
+            
+            // Возвращаем первый snapshot для обратной совместимости
+            return _exactSnapshots.Count > 0 ? _exactSnapshots[0] : default;
+        }
+
+        /// <summary>
+        /// Находит индекс точки траектории ближайшей к заданному времени.
+        /// </summary>
+        private int FindTrajectoryPointNearTime(double targetTime)
+        {
+            if (_exactTrajectoryTimes.Count == 0)
+                return -1;
+            
+            int idx = _exactTrajectoryTimes.BinarySearch(targetTime);
+            if (idx < 0)
+                idx = ~idx; // Индекс вставки
+            
+            return Math.Min(idx, _exactTrajectoryTimes.Count - 1);
         }
 
         private void DisposeJobResources()
