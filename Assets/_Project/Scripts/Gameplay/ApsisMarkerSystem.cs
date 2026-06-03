@@ -364,7 +364,7 @@ namespace Galilego.Gameplay
 
         private void CheckHover()
         {
-            if (referenceCamera == null || tooltip == null)
+            if (referenceCamera == null || tooltip == null || Mouse.current == null)
             {
                 if (referenceCamera == null)
                     Debug.LogWarning("[ApsisMarkerSystem.CheckHover] referenceCamera is null");
@@ -373,42 +373,167 @@ namespace Galilego.Gameplay
                 return;
             }
 
-            Vector2 mousePos = Mouse.current != null
-                ? Mouse.current.position.ReadValue()
-                : Vector2.zero;
+            Vector2 mousePos = Mouse.current.position.ReadValue();
 
-            float closestDist = float.MaxValue;
-            ApsisMarkerData closestData = default;
-            bool found = false;
-
-            for (int i = 0; i < markerDataList.Count; i++)
+            // For analytical system: check pooled markers via markerDataList
+            if (useAnalyticalSystem)
             {
-                ApsisMarkerData data = markerDataList[i];
-                if (!data.isVisible || !data.isValid) continue;
-
-                Vector3 screenPos = referenceCamera.WorldToScreenPoint(data.worldPosition);
-                if (screenPos.z < 0f) continue;
-
-                float dist = Vector2.Distance(new Vector2(screenPos.x, screenPos.y), mousePos);
-                
-                if (dist < closestDist)
+                if (TryGetHoveredMarkerFromList(mousePos, out ApsisMarkerData hovered))
                 {
-                    closestDist = dist;
-                    closestData = data;
-                    found = true;
+                    Debug.Log($"[CheckHover] Showing tooltip: mousePos={mousePos}, marker={hovered.label}");
+                    tooltip.Show(hovered, mousePos);
                 }
+                else
+                {
+                    tooltip.Hide();
+                }
+                return;
             }
 
-            if (found && closestDist < hoverThresholdPixels)
+            // For legacy system: check fixed markers
+            if (TryGetHoveredMarkerLegacy(mousePos, out ApsisMarkerData hoveredLegacy))
             {
-                // Показываем tooltip рядом с курсором мыши
-                Debug.Log($"[CheckHover] Showing tooltip: mousePos={mousePos}, markerWorldPos={closestData.worldPosition}, closestDist={closestDist:F1}px");
-                tooltip.Show(closestData, mousePos);
+                Debug.Log($"[CheckHover] Showing tooltip (legacy): mousePos={mousePos}, marker={hoveredLegacy.label}");
+                tooltip.Show(hoveredLegacy, mousePos);
             }
             else
             {
                 tooltip.Hide();
             }
+        }
+
+        /// <summary>
+        /// Checks if mouse is over a sprite by computing its screen-space bounding rectangle.
+        /// This gives accurate hover detection for billboard sprites at any zoom level.
+        /// </summary>
+        private bool IsMouseOverSprite(SpriteRenderer sr, Vector2 mousePos)
+        {
+            if (sr == null || sr.sprite == null || !sr.gameObject.activeInHierarchy) 
+                return false;
+
+            Bounds bounds = sr.sprite.bounds;
+
+            // Get the four corners of the sprite in local space
+            Vector3[] corners = new Vector3[4]
+            {
+                sr.transform.TransformPoint(new Vector3(-bounds.extents.x, -bounds.extents.y, 0f)),
+                sr.transform.TransformPoint(new Vector3(-bounds.extents.x,  bounds.extents.y, 0f)),
+                sr.transform.TransformPoint(new Vector3( bounds.extents.x,  bounds.extents.y, 0f)),
+                sr.transform.TransformPoint(new Vector3( bounds.extents.x, -bounds.extents.y, 0f))
+            };
+
+            // Project corners to screen space and compute bounding rect
+            float minX = float.MaxValue;
+            float minY = float.MaxValue;
+            float maxX = float.MinValue;
+            float maxY = float.MinValue;
+
+            for (int i = 0; i < corners.Length; i++)
+            {
+                Vector3 screenPos = referenceCamera.WorldToScreenPoint(corners[i]);
+
+                // If any corner is behind camera, reject the whole sprite
+                if (screenPos.z < 0f)
+                    return false;
+
+                if (screenPos.x < minX) minX = screenPos.x;
+                if (screenPos.y < minY) minY = screenPos.y;
+                if (screenPos.x > maxX) maxX = screenPos.x;
+                if (screenPos.y > maxY) maxY = screenPos.y;
+            }
+
+            // Check if mouse is inside screen-space bounding rect
+            return mousePos.x >= minX && mousePos.x <= maxX &&
+                   mousePos.y >= minY && mousePos.y <= maxY;
+        }
+
+        /// <summary>
+        /// Tries to find a hovered marker from the analytical system's markerDataList.
+        /// Uses screen-space rect checking for accurate hover detection.
+        /// </summary>
+        private bool TryGetHoveredMarkerFromList(Vector2 mousePos, out ApsisMarkerData hovered)
+        {
+            hovered = default;
+
+            // Check all active pooled markers
+            for (int i = 0; i < markerDataList.Count; i++)
+            {
+                ApsisMarkerData data = markerDataList[i];
+                if (!data.isVisible || !data.isValid) 
+                    continue;
+
+                // Find corresponding pooled marker GameObject
+                if (i >= markerPool.Count) 
+                    continue;
+
+                GameObject markerObj = markerPool[i];
+                if (markerObj == null || !markerObj.activeInHierarchy) 
+                    continue;
+
+                SpriteRenderer sr = markerObj.GetComponent<SpriteRenderer>();
+                if (sr == null) 
+                    continue;
+
+                if (IsMouseOverSprite(sr, mousePos))
+                {
+                    hovered = data;
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Tries to find a hovered marker from the legacy system's fixed markers.
+        /// </summary>
+        private bool TryGetHoveredMarkerLegacy(Vector2 mousePos, out ApsisMarkerData hovered)
+        {
+            hovered = default;
+
+            // Check periapsis marker
+            if (periapsisMarker != null && periapsisMarker.gameObject.activeInHierarchy)
+            {
+                if (IsMouseOverSprite(periapsisMarker, mousePos))
+                {
+                    hovered = periapsisData;
+                    return true;
+                }
+            }
+
+            // Check apoapsis marker
+            if (apoapsisMarker != null && apoapsisMarker.gameObject.activeInHierarchy)
+            {
+                if (IsMouseOverSprite(apoapsisMarker, mousePos))
+                {
+                    hovered = apoapsisData;
+                    return true;
+                }
+            }
+
+            // Check maneuver periapsis marker
+            if (maneuverPeMarker != null && maneuverPeMarker.gameObject.activeInHierarchy)
+            {
+                if (IsMouseOverSprite(maneuverPeMarker, mousePos))
+                {
+                    // TODO: Use separate maneuver data if available
+                    hovered = periapsisData;
+                    return true;
+                }
+            }
+
+            // Check maneuver apoapsis marker
+            if (maneuverApMarker != null && maneuverApMarker.gameObject.activeInHierarchy)
+            {
+                if (IsMouseOverSprite(maneuverApMarker, mousePos))
+                {
+                    // TODO: Use separate maneuver data if available
+                    hovered = apoapsisData;
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         private Color GetPeriapsisColor() => new Color(0.2f, 1.0f, 0.3f, 1f);
@@ -803,13 +928,23 @@ namespace Galilego.Gameplay
 
                 // Convert to ApsisMarkerData for tooltip system
                 double currentTime = universeManager != null ? universeManager.SimulationTimeSeconds : 0;
+                
+                // Create marker data with original orbital position
                 ApsisMarkerData markerData = apsisData.ToMarkerData(universeManager, currentTime);
                 
-                // Update worldPosition to actual marker position (after offset) for accurate hover detection
-                Vector3 actualMarkerWorldPos = markerObj.transform.position;
-                Vector3 orbitPos = universeManager.ToUnityPosition(apsisData.worldPosition);
-                float offsetDistance = Vector3.Distance(actualMarkerWorldPos, orbitPos);
+                // BUGFIX: Override worldPosition with actual sprite position for accurate hover detection
+                // This fixes the mismatch where hover detection used the orbital position instead of the visible sprite position
+                markerData.worldPosition = markerObj.transform.position;
                 
+                // Temporary debug for green markers
+                #if UNITY_EDITOR
+                if (apsisData.orbitType == OrbitType.Maneuver)
+                {
+                    Vector3 screenPos = referenceCamera.WorldToScreenPoint(markerData.worldPosition);
+                    Debug.Log($"[GREEN MARKER {apsisData.type}] worldPos={markerData.worldPosition}, screenPos={screenPos}, orbitType={apsisData.orbitType}");
+                }
+                #endif
+
                 markerDataList.Add(markerData);
 
                 markerIndex++;
