@@ -168,6 +168,9 @@ namespace Galilego.Universe
         private double nextShipHistoryRecordTime;
         private const double ShipHistoryRecordInterval = 5.0;
         private const int MaxShipHistorySamples = 86400; // 5 days at 5s intervals
+        // ─── Sub-frame interpolation for high timeScale ────────────────
+        private double _prevFixedSimTime;   // simTime на предыдущем FixedUpdate
+        private double _lastFrameDtSim;     // frameDt последнего FixedUpdate
         private Material runtimeLineMaterial;
         private Material runtimeOrbitMapMarkerMaterial;
         private ReferenceFrameTarget lastActiveReferenceFrame = ReferenceFrameTarget.Jupiter;
@@ -314,8 +317,11 @@ namespace Galilego.Universe
                 StepSimulation(stepDt);
             }
 
+            // ── Sub-frame interpolation: запомнить границы интервала ──
+            _prevFixedSimTime = simulationTimeSeconds - frameDt;
+            _lastFrameDtSim   = frameDt;
+
             ApplyFloatingOriginIfNeeded();
-            SyncAllVisuals();
         }
 
         private void Update()
@@ -332,6 +338,17 @@ namespace Galilego.Universe
 
             HandleCameraInput();
             RefreshReferenceFrameChange();
+
+            // ── Субкадровая интерполяция позиций небесных тел ─────────
+            // alpha = 0 в начале интервала [prevFixed, currFixed], 1 в конце
+            float alpha = Mathf.Clamp01(
+                (float)((Time.timeAsDouble - Time.fixedTimeAsDouble) / Time.fixedDeltaTime));
+#if UNITY_EDITOR
+            if (alpha < -0.01f || alpha > 1.01f)
+                Debug.LogWarning($"UniverseManager: visual alpha out of range: {alpha}");
+#endif
+            double visualTime = _prevFixedSimTime + _lastFrameDtSim * alpha;
+            SyncAllVisualsAtTime(visualTime);
         }
 
         private void LateUpdate()
@@ -2779,10 +2796,15 @@ namespace Galilego.Universe
 
         private void SyncAllVisuals()
         {
+            SyncAllVisualsAtTime(simulationTimeSeconds);
+        }
+
+        private void SyncAllVisualsAtTime(double visualTime)
+        {
             // Ensure the runtime bodies are initialized and lists are in sync before applying visuals.
             EnsureInitialized();
             // Keep all bodies at simulated "now". Flight-plan time horizon only trims the plotted maneuver trajectory.
-            double previewTime = simulationTimeSeconds;
+            double previewTime = visualTime;
 
             // Apply visual scale for Jupiter and moons based on real radii
             ApplyVisualScale(jupiterTransform, jupiterRadius);

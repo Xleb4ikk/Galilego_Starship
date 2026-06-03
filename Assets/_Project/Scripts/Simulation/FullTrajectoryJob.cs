@@ -74,6 +74,8 @@ namespace Galilego.Simulation
         {
             int totalPoints = 0;
             int ephemIdx = StartEphemerisIndex >= 0 ? StartEphemerisIndex : 0;
+            double3 fsalAccel = double3.zero;
+            bool fsalValid = false;
             int cpCount = 0;
             double nextCheckpointTime = StartTime + CheckpointIntervalSeconds;
             int bCount = 0;
@@ -148,6 +150,8 @@ namespace Galilego.Simulation
                         double3 localVel = currentVel - frameVel;
                         double3 dv = CalculateWorldDeltaV(localPos, localVel, currentNode);
                         currentVel += dv;
+                        // После манёвра сбросить FSAL, т.к. скорость изменилась
+                        fsalValid = false;
                         totalPoints = AddPoint(OutputPoints, totalPoints, MaxPoints, currentPos, currentTime, 1);
 
                         if (currentNode.HasEngine != 0 && currentNode.IsInstant == 0)
@@ -218,11 +222,11 @@ namespace Galilego.Simulation
                         break;
                     }
 
-                    // Single adaptive step with error control
+                    // Single adaptive step with error control (FSAL: k7 → k1 propagation)
                     bool stepAccepted = TryAdvanceStep(
                         ref currentPos, ref currentVel, ref currentTime,
                         targetTime, ref ephemIdx,
-                        ref dt);
+                        ref dt, ref fsalAccel, ref fsalValid);
 
                     if (!IsFinite(currentPos) || !IsFinite(currentVel))
                     {
@@ -263,6 +267,8 @@ namespace Galilego.Simulation
                     double3 localVel = currentVel - frameVel;
                     double3 dv = CalculateWorldDeltaV(localPos, localVel, currentNode);
                     currentVel += dv;
+                    // После манёвра сбросить FSAL
+                    fsalValid = false;
 
                     totalPoints = AddPoint(OutputPoints, totalPoints, MaxPoints,
                         currentPos, currentTime, 1);
@@ -307,17 +313,16 @@ namespace Galilego.Simulation
         // ─── Dormand–Prince 5(4) step ─────────────────────────────────
         /// <summary>
         /// Выполняет один шаг Dormand–Prince 5(4) с контролем ошибки.
-        /// Возвращает результат 5-го порядка и оценки ошибок по позиции и скорости.
+        /// Каждая стадия вычисляет гравитацию в правильное время (t + c_i * dt),
+        /// чтобы учитывать движение лун внутри шага.
+        /// FSAL (First Same As Last): k7 текущего шага = k1 следующего.
         /// </summary>
         private IntegrationResult DoPri5Step(
-            double3 pos, double3 vel, double dt,
-            ref SubstepData data,
-            out double errPos, out double errVel)
+            double3 pos, double3 vel, double time, double dt, int hintEphemIdx,
+            out double errPos, out double errVel,
+            double3 fsalAccel, out double3 lastAccel)
         {
-            if (ProfileCounters.IsCreated) ProfileCounters[PC_EVAL_ACCEL] += 7;
-
             // Dormand–Prince 5(4) coefficients (Butcher tableau)
-            // 7 stages, FSAL = false (we don't reuse last evaluation)
             const double a21 = 1.0 / 5.0;
             const double a31 = 3.0 / 40.0;
             const double a32 = 9.0 / 40.0;
@@ -339,35 +344,39 @@ namespace Galilego.Simulation
             const double a75 = -2187.0 / 6784.0;
             const double a76 = 11.0 / 84.0;
 
-            // Stage evaluations
-            double3 k1v = EvaluateAccelerationCached(pos, ref data);
+            // Stage evaluations with time-dependent gravity
+            // c-values: 0, 1/5, 3/10, 4/5, 8/9, 1, 1
+            // FSAL: k1v берётся из переданного fsalAccel (k7 предыдущего шага)
+            // Локальная копия hint — внешний ephemIdx не мутируется стадиями DoPri5
+            int localHint = hintEphemIdx;
+            double3 k1v = fsalAccel;
             double3 k1p = vel;
 
             double3 pos2 = pos + k1p * (dt * a21);
             double3 vel2 = vel + k1v * (dt * a21);
-            double3 a2 = EvaluateAccelerationCached(pos2, ref data);
+            double3 a2 = EvaluateAccelerationAt(pos2, time + dt * (1.0/5.0), ref localHint);
 
             double3 pos3 = pos + (k1p * (dt * a31) + vel2 * (dt * a32));
             double3 vel3 = vel + (k1v * (dt * a31) + a2 * (dt * a32));
-            double3 a3 = EvaluateAccelerationCached(pos3, ref data);
+            double3 a3 = EvaluateAccelerationAt(pos3, time + dt * (3.0/10.0), ref localHint);
 
             double3 pos4 = pos + (k1p * (dt * a41) + vel2 * (dt * a42) + vel3 * (dt * a43));
             double3 vel4 = vel + (k1v * (dt * a41) + a2 * (dt * a42) + a3 * (dt * a43));
-            double3 a4 = EvaluateAccelerationCached(pos4, ref data);
+            double3 a4 = EvaluateAccelerationAt(pos4, time + dt * (4.0/5.0), ref localHint);
 
             double3 pos5 = pos + (k1p * (dt * a51) + vel2 * (dt * a52) + vel3 * (dt * a53) + vel4 * (dt * a54));
             double3 vel5 = vel + (k1v * (dt * a51) + a2 * (dt * a52) + a3 * (dt * a53) + a4 * (dt * a54));
-            double3 a5 = EvaluateAccelerationCached(pos5, ref data);
+            double3 a5 = EvaluateAccelerationAt(pos5, time + dt * (8.0/9.0), ref localHint);
 
             double3 pos6 = pos + (k1p * (dt * a61) + vel2 * (dt * a62) + vel3 * (dt * a63) + vel4 * (dt * a64) + vel5 * (dt * a65));
             double3 vel6 = vel + (k1v * (dt * a61) + a2 * (dt * a62) + a3 * (dt * a63) + a4 * (dt * a64) + a5 * (dt * a65));
-            double3 a6 = EvaluateAccelerationCached(pos6, ref data);
+            double3 a6 = EvaluateAccelerationAt(pos6, time + dt, ref localHint);
 
             double3 pos7 = pos + (k1p * (dt * a71) + vel3 * (dt * a73) + vel4 * (dt * a74) + vel5 * (dt * a75) + vel6 * (dt * a76));
             double3 vel7 = vel + (k1v * (dt * a71) + a3 * (dt * a73) + a4 * (dt * a74) + a5 * (dt * a75) + a6 * (dt * a76));
-            double3 a7 = EvaluateAccelerationCached(pos7, ref data);
+            double3 a7 = EvaluateAccelerationAt(pos7, time + dt, ref localHint);
 
-            // 5th order weights (using b_i coefficients)
+            // 5th order weights
             const double b1 = 35.0 / 384.0;
             const double b3 = 500.0 / 1113.0;
             const double b4 = 125.0 / 192.0;
@@ -392,57 +401,46 @@ namespace Galilego.Simulation
             errPos = math.length(fifthPos - fourthPos);
             errVel = math.length(fifthVel - fourthVel);
 
+            // FSAL: k7 этого шага = k1 следующего шага (если принят)
+            lastAccel = a7;
+
             return new IntegrationResult { Position = fifthPos, Velocity = fifthVel };
         }
 
         // ─── Event-aware stepping caps ──────────────────────────────
-        /// <summary>
-        /// Вычисляет ограничения шага по геометрии, манёврам и границам сегментов.
-        /// </summary>
         private double ComputeEventCaps(
             double3 pos, double3 vel, double currentTime,
             double targetTime, ref SubstepData data)
         {
             double dt = targetTime - currentTime;
 
-            // 1. Geometry: no more than 1/10 of time to closest approach
             double minDist = data.MinDistToAnyBody;
             double speed = math.length(vel);
             double timeToClosest = minDist / math.max(speed, 0.1);
             double dtGeom = timeToClosest * 0.1;
 
-            // 2. Sphere of influence: tighter step near bodies
             if (JupiterRadius > 0.0 && minDist < JupiterRadius * 10.0)
                 dtGeom = math.min(dtGeom, 60.0);
             if (MoonRadius > 0.0 && minDist < MoonRadius * 10.0)
                 dtGeom = math.min(dtGeom, 10.0);
 
-            // 3. Maneuver: within 1 hour before/after — step no larger than time to maneuver * 0.01
             double dtManeuver = dt;
             double timeToManeuver = targetTime - currentTime;
             if (timeToManeuver > 0.0 && timeToManeuver < 3600.0)
                 dtManeuver = timeToManeuver * 0.01;
 
-            // 4. Segment boundary: don't overshoot targetTime
-            double dtRemaining = dt;
-
-            // Combine all caps
-            double capped = math.min(dtGeom, math.min(dtManeuver, dtRemaining));
+            double capped = math.min(dtGeom, math.min(dtManeuver, dt));
             return math.max(capped, MinStepSeconds);
         }
 
-        // ─── Adaptive integrator (single step) ──────────────────────
-        /// <summary>
-        /// Делает один адаптивный шаг Dormand–Prince 5(4) с контролем ошибки
-        /// и event-aware caps. Возвращает false если шаг не принят (reject).
-        /// Не содержит цикл по времени — внешний цикл управляет итерациями.
-        /// </summary>
+        // ─── Adaptive integrator (single step, FSAL-aware) ──────────
         private bool TryAdvanceStep(
             ref double3 pos, ref double3 vel, ref double time,
             double targetTime, ref int ephemIdx,
-            ref double dt)
+            ref double dt,
+            ref double3 fsalAccel, ref bool fsalValid)
         {
-            // Get fresh ephemeris data for current position/time
+            // PrepareSubstepData only for MinDistToAnyBody (event caps)
             var stepData = PrepareSubstepData(time, pos, ref ephemIdx);
 
             // Apply event-aware caps
@@ -450,8 +448,17 @@ namespace Galilego.Simulation
             dt = math.min(dt, cappedDt);
             if (time + dt > targetTime) dt = targetTime - time;
 
-            // DoPri5 step with error estimation
-            var result = DoPri5Step(pos, vel, dt, ref stepData, out double errPos, out double errVel);
+            // FSAL: если не валиден (первый шаг, после reject или после манёвра),
+            // вычисляем k1 явно. Иначе fsalAccel содержит k7 предыдущего принятого шага.
+            if (!fsalValid)
+            {
+                fsalAccel = EvaluateAccelerationAt(pos, time, ref ephemIdx);
+                fsalValid = true;
+            }
+
+            // DoPri5: k1 = fsalAccel, остальные 6 стадий вычисляются внутри
+            var result = DoPri5Step(pos, vel, time, dt, ephemIdx, out double errPos, out double errVel,
+                fsalAccel, out double3 newLastAccel);
 
             // Scaled error
             double scalePos = AbsTol + RelTol * math.max(math.length(pos), math.length(result.Position));
@@ -465,7 +472,10 @@ namespace Galilego.Simulation
                 vel = result.Velocity;
                 time += dt;
 
-                // Increase next step with safety factor
+                // FSAL: k7 принятого шага = k1 следующего
+                fsalAccel = newLastAccel;
+                fsalValid = true;
+
                 double stepScale = math.clamp(
                     0.9 * math.pow(1.0 / math.max(normalizedError, 1e-10), 0.2),
                     0.2, 5.0);
@@ -474,21 +484,76 @@ namespace Galilego.Simulation
             }
             else
             {
-                // REJECT — retry with smaller step (Pi control formula)
                 double rejectScale = math.clamp(
                     0.9 * math.pow(1.0 / math.max(normalizedError, 1e-10), 0.2),
                     0.1, 0.5);
                 dt = math.max(dt * rejectScale, MinStepSeconds);
                 if (dt <= MinStepSeconds)
                 {
-                    // Force-accept at minimum step
+                    // Force-accept с минимальным шагом
                     pos = result.Position;
                     vel = result.Velocity;
                     time += dt;
+
+                    // FSAL: k7 force-accepted шага = k1 следующего
+                    fsalAccel = newLastAccel;
+                    fsalValid = true;
                     return true;
                 }
+
+                // REJECT: FSAL невалиден для следующей попытки
+                fsalValid = false;
                 return false;
             }
+        }
+
+        // ─── Time-dependent acceleration evaluation ─────────────────
+        /// <summary>
+        /// Вычисляет сумму гравитационных ускорений от Юпитера и всех лун
+        /// для заданного корабля и времени t. Луны интерполируются через
+        /// Hermite по эфемеридной таблице на момент t.
+        /// </summary>
+        private double3 EvaluateAccelerationAt(double3 pos, double t, ref int hintIdx)
+        {
+            if (ProfileCounters.IsCreated) ProfileCounters[PC_EVAL_ACCEL]++;
+            
+            double3 total = double3.zero;
+
+            if (JupiterSGP > 0.0)
+            {
+                total += BodyGravity(pos, JupiterPosition, JupiterSGP);
+            }
+
+            if (MoonCount > 0 && MoonEphemeris.Length > 0 && EphemerisTimes.Length > 0)
+            {
+                int timesLen = EphemerisTimes.Length;
+                int idx = math.clamp(hintIdx, 0, timesLen - 2);
+                while (idx < timesLen - 2 && EphemerisTimes[idx + 1] < t)
+                {
+                    idx++;
+                    if (ProfileCounters.IsCreated) ProfileCounters[PC_EPHEM_SEARCH]++;
+                }
+
+                hintIdx = idx; // Update hint for next call
+
+                double t0 = EphemerisTimes[idx];
+                double t1 = EphemerisTimes[math.min(idx + 1, timesLen - 1)];
+                int b0 = idx * MoonCount;
+                int b1 = math.min(idx + 1, timesLen - 1) * MoonCount;
+
+                int mCount = math.min(MoonCount, 4);
+                for (int m = 0; m < mCount; m++)
+                {
+                    if (ProfileCounters.IsCreated) ProfileCounters[PC_HERMITE]++;
+                    double3 moonPos = AccelerationEvaluator.HermiteInterpolate(
+                        MoonEphemeris[b0 + m].Position, MoonVelocities[b0 + m],
+                        MoonEphemeris[b1 + m].Position, MoonVelocities[b1 + m],
+                        t0, t1, t);
+                    total += BodyGravity(pos, moonPos, MoonEphemeris[b0 + m].StandardGravitationalParameter);
+                }
+            }
+
+            return total;
         }
 
         private int AddPoint(NativeArray<TrajectoryPoint> points, int index, int max, double3 pos, double time, int isDashed)
@@ -509,9 +574,6 @@ namespace Galilego.Simulation
         private SubstepData PrepareSubstepData(double time, double3 shipPos, ref int ephemIdx)
         {
             SubstepData data;
-            data.MoonCount = MoonCount;
-            data.Moon0 = default; data.Moon1 = default; data.Moon2 = default; data.Moon3 = default;
-
             double minDistSq = math.lengthsq(shipPos - JupiterPosition);
 
             if (MoonCount > 0 && MoonEphemeris.Length > 0 && EphemerisTimes.Length > 0)
@@ -532,32 +594,34 @@ namespace Galilego.Simulation
                 }
 
                 int idx = ephemIdx;
+                
+                // Simplified: only compute MinDistToAnyBody without full Hermite interpolation
+                // Use linear approximation for distance calculation (good enough for event caps)
+                // Linear interpolation error is acceptable here because:
+                // - MinDistToAnyBody is only used for geometric step limiting (event caps)
+                // - Not used for acceleration evaluation (which requires Hermite precision)
+                // - At ephemerisStep=18000s (5h), error ~5% of distance is acceptable for caps
+                // - At ephemerisStep=60s (1min), error is negligible
                 if (idx >= 0 && idx < timesLen - 1)
                 {
                     double t0 = EphemerisTimes[idx];
                     double t1 = EphemerisTimes[idx + 1];
+                    double alpha = (time - t0) / math.max(t1 - t0, 1e-10);
+                    alpha = math.clamp(alpha, 0.0, 1.0);
+                    
                     int b0 = idx * MoonCount;
                     int b1 = (idx + 1) * MoonCount;
 
                     for (int m = 0; m < MoonCount; m++)
                     {
-                        if (ProfileCounters.IsCreated) ProfileCounters[PC_HERMITE]++;
-                        double3 moonPos = AccelerationEvaluator.HermiteInterpolate(
+                        // Linear interpolation for distance check (faster than Hermite)
+                        double3 moonPos = math.lerp(
                             MoonEphemeris[b0 + m].Position,
-                            MoonVelocities[b0 + m],
                             MoonEphemeris[b1 + m].Position,
-                            MoonVelocities[b1 + m],
-                            t0, t1, time);
+                            alpha);
 
-                        double sgp = MoonEphemeris[b0 + m].StandardGravitationalParameter;
                         double moonDistSq = math.lengthsq(moonPos - shipPos);
                         if (moonDistSq < minDistSq) minDistSq = moonDistSq;
-
-                        BodyState ms = new BodyState { Position = moonPos, StandardGravitationalParameter = sgp };
-                        if (m == 0) data.Moon0 = ms;
-                        else if (m == 1) data.Moon1 = ms;
-                        else if (m == 2) data.Moon2 = ms;
-                        else if (m == 3) data.Moon3 = ms;
                     }
                 }
                 else if (idx >= 0 && idx < timesLen)
@@ -566,44 +630,14 @@ namespace Galilego.Simulation
                     for (int m = 0; m < MoonCount; m++)
                     {
                         double3 moonPos = MoonEphemeris[b + m].Position;
-                        double sgp = MoonEphemeris[b + m].StandardGravitationalParameter;
                         double moonDistSq = math.lengthsq(moonPos - shipPos);
                         if (moonDistSq < minDistSq) minDistSq = moonDistSq;
-
-                        BodyState ms = new BodyState { Position = moonPos, StandardGravitationalParameter = sgp };
-                        if (m == 0) data.Moon0 = ms;
-                        else if (m == 1) data.Moon1 = ms;
-                        else if (m == 2) data.Moon2 = ms;
-                        else if (m == 3) data.Moon3 = ms;
                     }
                 }
             }
 
             data.MinDistToAnyBody = math.sqrt(minDistSq);
             return data;
-        }
-
-        private double3 EvaluateAccelerationCached(double3 pos, ref SubstepData data)
-        {
-            double3 total = double3.zero;
-
-            if (JupiterSGP > 0.0)
-            {
-                total += BodyGravity(pos, JupiterPosition, JupiterSGP);
-            }
-
-            if (data.MoonCount > 0)
-            {
-                total += BodyGravity(pos, data.Moon0.Position, data.Moon0.StandardGravitationalParameter);
-                if (data.MoonCount > 1)
-                    total += BodyGravity(pos, data.Moon1.Position, data.Moon1.StandardGravitationalParameter);
-                if (data.MoonCount > 2)
-                    total += BodyGravity(pos, data.Moon2.Position, data.Moon2.StandardGravitationalParameter);
-                if (data.MoonCount > 3)
-                    total += BodyGravity(pos, data.Moon3.Position, data.Moon3.StandardGravitationalParameter);
-            }
-
-            return total;
         }
 
         private static double3 BodyGravity(double3 shipPos, double3 bodyPos, double sgp)
@@ -672,8 +706,8 @@ namespace Galilego.Simulation
 
         private struct SubstepData
         {
-            public BodyState Moon0, Moon1, Moon2, Moon3;
-            public int MoonCount;
+            // Only used for MinDistToAnyBody calculation in event caps
+            // Moon positions are computed on-demand via EvaluateAccelerationAt
             public double MinDistToAnyBody;
         }
     }

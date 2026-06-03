@@ -62,6 +62,9 @@ namespace Galilego.Gameplay
         [SerializeField] private double lodMidTime = 2592000.0;         // 30 дней
         [SerializeField] private double lodErrorTolerance = 0.01f;      // макс отклонение полилинии (Unity units)
 
+        [Header("Moon Prediction Performance")]
+        [SerializeField] private float moonVisRebuildIntervalReal = 0.5f;  // реальные секунды между пересчётами лунных орбит
+
         // Временные буферы для LOD
         private Vector3[] _lodPoints;
         private double[] _lodTimes;
@@ -107,6 +110,8 @@ namespace Galilego.Gameplay
         private List<MoonPredictionCache> moonPredictionCaches = new List<MoonPredictionCache>();
         private Transform moonPredictionRoot;
         private bool moonPredictionNeedsRebuild = true;
+        private float _moonVisLastRebuildRealTime = -999f;
+        private float _moonPredLastRebuildRealTime = -999f;
 
         private FlightPlan flightPlan = new FlightPlan();
         private bool isDirty = false;
@@ -186,6 +191,27 @@ namespace Galilego.Gameplay
         private Vector3[] ballisticPositions;
         private double[] ballisticTimesData;
         private int ballisticCount;
+        private Vector3[] _ballisticClipBuffer = new Vector3[0];
+
+        // ─── Moon prediction cache ──────────────────────────────────
+        private double _cachedMoonEndTime = -1.0;
+        private double _cachedMoonSimTime = -1.0;
+        private ReferenceFrameTarget _cachedMoonFrame = ReferenceFrameTarget.Jupiter;
+        private MoonOrbitData[] _moonOrbitDataCache = null; // Reusable buffer to avoid GC allocation
+
+        // ─── MoonPredictionLinesJob (Burst parallel) ────────────────────────
+        private JobHandle _moonPredJobHandle;
+        private bool _moonPredJobRunning = false;
+        private NativeArray<float3> _moonPredResults;
+        private NativeArray<double> _moonPredSampleTimes;
+        private NativeArray<double3> _moonPredFramePositions;
+        private NativeArray<MoonOrbitData> _moonPredOrbits;
+        private int _moonPredSamplesPerMoon;
+        private int _moonPredMoonCount;
+        private double _moonPredSimTime;
+        private double _moonPredEndTime;
+        private ReferenceFrameTarget _moonPredFrame;
+        private bool _moonPredNeedsRebuild = true;
 
         private void OnEnable()
         {
@@ -272,12 +298,14 @@ namespace Galilego.Gameplay
                 }
             }
 
+            ScheduleMoonPredictionJob();
             UpdateTrajectoryClip();
             UpdateVisibility();
         }
 
         private void LateUpdate()
         {
+            CompleteMoonPredictionJob();
             UpdateMarkerPosition();
             UpdateMoonPredictionVisuals();
             ShrinkPassedSegments();
@@ -314,10 +342,11 @@ namespace Galilego.Gameplay
                 }
                 else
                 {
-                    var clipped = new Vector3[bRemaining];
-                    Array.Copy(ballisticPositions, bStart, clipped, 0, bRemaining);
+                    if (_ballisticClipBuffer.Length < bRemaining)
+                        _ballisticClipBuffer = new Vector3[bRemaining];
+                    Array.Copy(ballisticPositions, bStart, _ballisticClipBuffer, 0, bRemaining);
                     ballisticLine.positionCount = bRemaining;
-                    ballisticLine.SetPositions(clipped);
+                    ballisticLine.SetPositions(_ballisticClipBuffer);
                 }
             }
         }
@@ -1408,6 +1437,7 @@ namespace Galilego.Gameplay
 
         private void DisposeAllNativeBuffers()
         {
+            DisposeMoonPredictionBuffers();
             if (nativeMoonOrbits.IsCreated) nativeMoonOrbits.Dispose();
             if (nativeNodeData.IsCreated) nativeNodeData.Dispose();
             if (nativeBallisticNodeData.IsCreated) nativeBallisticNodeData.Dispose();
@@ -1973,6 +2003,10 @@ namespace Galilego.Gameplay
                 return;
             }
 
+            // Если job ещё выполняется — не делаем полный пересчёт
+            if (_moonPredJobRunning)
+                return;
+
             EnsureMoonPredictionCaches(moonCount);
             bool show = universeManager.CameraMode == SpaceCameraMode.OrbitMap;
             ReferenceFrameTarget frame = universeManager.ActiveReferenceFrame;
@@ -1982,8 +2016,11 @@ namespace Galilego.Gameplay
             {
                 const int kMaxSamples = 16384;
                 double shortestPeriod = double.PositiveInfinity;
-                var tmpOrbits = new MoonOrbitData[moonCount];
-                universeManager.FillMoonOrbitData(tmpOrbits, 0, moonCount, simTime);
+                // Reuse buffer to avoid GC allocation
+                if (_moonOrbitDataCache == null || _moonOrbitDataCache.Length < moonCount)
+                    _moonOrbitDataCache = new MoonOrbitData[moonCount];
+                universeManager.FillMoonOrbitData(_moonOrbitDataCache, 0, moonCount, simTime);
+                var tmpOrbits = _moonOrbitDataCache;
                 for (int _i = 0; _i < moonCount; _i++)
                 {
                     double _sma = tmpOrbits[_i].SemiMajorAxis;
@@ -2037,13 +2074,33 @@ namespace Galilego.Gameplay
             // Position root at frame pos at current simTime (same convention as moonOrbitRoot)
             universeManager.ApplyVisualPosition(GetMoonPredictionRoot(), framePosAtTime[0]);
 
+            // ── Cache check: early return if inputs haven't changed ──────────────
+            bool endTimeChanged = Math.Abs(endTime - _cachedMoonEndTime) > 1.0;
+            bool frameChanged = frame != _cachedMoonFrame;
+            bool timeElapsed = (Time.unscaledTime - _moonVisLastRebuildRealTime) >= moonVisRebuildIntervalReal;
+            bool needsRebuild = endTimeChanged || frameChanged || timeElapsed;
+            
+            if (!needsRebuild)
+            {
+                // Sync visibility only
+                for (int i = 0; i < moonCount; i++)
+                {
+                    var c = moonPredictionCaches[i];
+                    if (c.Line != null && c.Line.gameObject.activeSelf != show)
+                        c.Line.gameObject.SetActive(show);
+                    if (c.Marker != null && c.Marker.activeSelf != show)
+                        c.Marker.SetActive(show);
+                }
+                return;
+            }
+
             for (int i = 0; i < moonCount; i++)
             {
                 var cache = moonPredictionCaches[i];
 
                 // ── Material / color setup (only when slider changed) ────────────
-                bool endTimeChanged = Math.Abs(endTime - cache.CachedEndTime) > 1.0;
-                if (endTimeChanged || cache.ColorDirty)
+                bool cacheEndTimeChanged = Math.Abs(endTime - cache.CachedEndTime) > 1.0;
+                if (cacheEndTimeChanged || cache.ColorDirty)
                 {
                     cache.CachedEndTime = endTime;
                     cache.ColorDirty = false;
@@ -2066,8 +2123,6 @@ namespace Galilego.Gameplay
                         lineMaterial.SetColor("_Color", moonColor);
                     else
                         lineMaterial.color = moonColor;
-
-                    cache.Line.positionCount = samples;
                 }
 
                 // ── Compute moon positions and convert to frame-relative ─────────
@@ -2091,6 +2146,7 @@ namespace Galilego.Gameplay
                         }
                     }
 
+                    cache.Line.positionCount = samples; // Set position count BEFORE SetPositions
                     cache.Line.SetPositions(cache.LocalPositionsBuffer);
                     
                     // Calculate width based on average distance from camera to line points
@@ -2131,6 +2187,12 @@ namespace Galilego.Gameplay
                         cache.Marker.SetActive(show);
                 }
             }
+            
+            // Update cache after successful recalculation
+            _cachedMoonEndTime = endTime;
+            _cachedMoonSimTime = simTime;
+            _cachedMoonFrame = frame;
+            _moonVisLastRebuildRealTime = Time.unscaledTime;
         }
 
         private void HideMoonPredictionVisuals()
@@ -2151,6 +2213,185 @@ namespace Galilego.Gameplay
             }
             moonPredictionCaches.Clear();
             moonPredictionNeedsRebuild = true;
+        }
+
+        // ─── MoonPredictionLinesJob: Schedule ─────────────────────────
+        private void ScheduleMoonPredictionJob()
+        {
+            if (_moonPredJobRunning) return;
+
+            if (universeManager == null) return;
+
+            double simTime = universeManager.SimulationTimeSeconds;
+            double endTime = universeManager.TrajectoryPreviewEndTime;
+            if (endTime <= simTime + 0.5) return;
+
+            int moonCount = universeManager.MoonCount;
+            if (moonCount == 0) return;
+
+            // Проверить, нужно ли пересчитывать
+            bool rebuild = _moonPredNeedsRebuild ||
+                Math.Abs(endTime - _moonPredEndTime) > 1.0 ||
+                universeManager.ActiveReferenceFrame != _moonPredFrame ||
+                (Time.unscaledTime - _moonPredLastRebuildRealTime) >= moonVisRebuildIntervalReal;
+            if (!rebuild) return;
+
+            int samples = 0;
+            {
+                const int kMaxSamples = 16384;
+                double shortestPeriod = double.PositiveInfinity;
+                if (_moonOrbitDataCache == null || _moonOrbitDataCache.Length < moonCount)
+                    _moonOrbitDataCache = new MoonOrbitData[moonCount];
+                universeManager.FillMoonOrbitData(_moonOrbitDataCache, 0, moonCount, simTime);
+                var tmpOrbits = _moonOrbitDataCache;
+                for (int _i = 0; _i < moonCount; _i++)
+                {
+                    double _sma = tmpOrbits[_i].SemiMajorAxis;
+                    double _mu  = tmpOrbits[_i].GravitationalParameter;
+                    if (_sma > 0 && _mu > 0)
+                    {
+                        double _period = 2.0 * Math.PI * Math.Sqrt(_sma * _sma * _sma / _mu);
+                        if (_period > 1.0 && _period < shortestPeriod)
+                            shortestPeriod = _period;
+                    }
+                }
+                double predictionSpan = endTime - simTime;
+                if (double.IsInfinity(shortestPeriod))
+                    samples = Math.Max(2, moonPredictionSamples);
+                else
+                {
+                    double orbitsInSpan = predictionSpan / shortestPeriod;
+                    int needed = (int)Math.Ceiling(orbitsInSpan * Math.Max(1, moonPredictionSamplesPerOrbit));
+                    samples = Math.Max(moonPredictionSamples, needed);
+                    samples = Math.Max(2, Math.Min(kMaxSamples, samples));
+                }
+            }
+
+            ReferenceFrameTarget frame = universeManager.ActiveReferenceFrame;
+
+            // Выделить/переиспользовать нативные буферы
+            int total = moonCount * samples;
+            if (!_moonPredResults.IsCreated || _moonPredResults.Length < total)
+            {
+                if (_moonPredResults.IsCreated) _moonPredResults.Dispose();
+                _moonPredResults = new NativeArray<float3>(total, Allocator.Persistent);
+            }
+            if (!_moonPredSampleTimes.IsCreated || _moonPredSampleTimes.Length < samples)
+            {
+                if (_moonPredSampleTimes.IsCreated) _moonPredSampleTimes.Dispose();
+                _moonPredSampleTimes = new NativeArray<double>(samples, Allocator.Persistent);
+                if (_moonPredFramePositions.IsCreated) _moonPredFramePositions.Dispose();
+                _moonPredFramePositions = new NativeArray<double3>(samples, Allocator.Persistent);
+            }
+            if (!_moonPredOrbits.IsCreated || _moonPredOrbits.Length < moonCount)
+            {
+                if (_moonPredOrbits.IsCreated) _moonPredOrbits.Dispose();
+                _moonPredOrbits = new NativeArray<MoonOrbitData>(moonCount, Allocator.Persistent);
+            }
+
+            // Заполнить времена и позиции фрейма (дёшево, Kepler тут нет)
+            for (int j = 0; j < samples; j++)
+            {
+                double t = simTime + (endTime - simTime) * (j / (double)(samples - 1));
+                _moonPredSampleTimes[j] = t;
+                if (!universeManager.TryGetReferenceStateAtTime(
+                        frame, t, out _, out Vector3d fp, out _, out _, out _, out _))
+                    fp = universeManager.JupiterPosition;
+                _moonPredFramePositions[j] = new double3(fp.X, fp.Y, fp.Z);
+            }
+
+            // Заполнить орбиты
+            if (_moonOrbitDataCache == null || _moonOrbitDataCache.Length < moonCount)
+                _moonOrbitDataCache = new MoonOrbitData[moonCount];
+            universeManager.FillMoonOrbitData(_moonOrbitDataCache, 0, moonCount, simTime);
+            for (int i = 0; i < moonCount; i++)
+                _moonPredOrbits[i] = _moonOrbitDataCache[i];
+
+            _moonPredSamplesPerMoon = samples;
+            _moonPredMoonCount = moonCount;
+            _moonPredSimTime = simTime;
+            _moonPredEndTime = endTime;
+            _moonPredLastRebuildRealTime = Time.unscaledTime;
+            _moonPredFrame = frame;
+            _moonPredNeedsRebuild = false;
+
+            int planeMapping = universeManager.CurrentPlaneMapping ==
+                AstrodynamicPlaneMapping.UnityXyPlaneZUp ? 0 : 1;
+
+            var job = new MoonPredictionLinesJob
+            {
+                Orbits = _moonPredOrbits,
+                SampleTimes = _moonPredSampleTimes,
+                FramePositions = _moonPredFramePositions,
+                JupiterPosition = new double3(
+                    universeManager.JupiterPosition.X,
+                    universeManager.JupiterPosition.Y,
+                    universeManager.JupiterPosition.Z),
+                SamplesPerMoon = samples,
+                PlaneMapping = planeMapping,
+                Results = _moonPredResults
+            };
+
+            _moonPredJobHandle = job.Schedule(total, 64);
+            _moonPredJobRunning = true;
+        }
+
+        // ─── MoonPredictionLinesJob: Complete and apply ──────────────
+        private void CompleteMoonPredictionJob()
+        {
+            if (!_moonPredJobRunning) return;
+            if (!_moonPredJobHandle.IsCompleted) return;
+
+            _moonPredJobHandle.Complete();
+            _moonPredJobRunning = false;
+
+            // Синхронизировать кэш-переменные, чтобы UpdateMoonPredictionVisuals
+            // не запускал повторный пересчёт сразу после завершения джоба
+            _cachedMoonSimTime = _moonPredSimTime;
+            _cachedMoonEndTime = _moonPredEndTime;
+            _cachedMoonFrame   = _moonPredFrame;
+            _moonVisLastRebuildRealTime = Time.unscaledTime;
+
+            // Проверить, что кэши LineRenderer существуют
+            int moonCount = _moonPredMoonCount;
+            if (moonCount == 0 || moonCount > moonPredictionCaches.Count) return;
+
+            bool show = universeManager != null &&
+                universeManager.CameraMode == SpaceCameraMode.OrbitMap;
+
+            for (int i = 0; i < moonCount; i++)
+            {
+                var cache = moonPredictionCaches[i];
+                if (cache.Line == null) continue;
+
+                int start = i * _moonPredSamplesPerMoon;
+                if (cache.LocalPositionsBuffer == null ||
+                    cache.LocalPositionsBuffer.Length < _moonPredSamplesPerMoon)
+                    cache.LocalPositionsBuffer = new Vector3[_moonPredSamplesPerMoon];
+
+                for (int j = 0; j < _moonPredSamplesPerMoon; j++)
+                    cache.LocalPositionsBuffer[j] = _moonPredResults[start + j];
+
+                cache.Line.positionCount = _moonPredSamplesPerMoon;
+                cache.Line.SetPositions(cache.LocalPositionsBuffer);
+
+                if (cache.Line.gameObject.activeSelf != show)
+                    cache.Line.gameObject.SetActive(show);
+            }
+        }
+
+        // ─── Dispose MoonPredictionLinesJob buffers ──────────────────
+        private void DisposeMoonPredictionBuffers()
+        {
+            if (_moonPredJobRunning)
+            {
+                _moonPredJobHandle.Complete();
+                _moonPredJobRunning = false;
+            }
+            if (_moonPredResults.IsCreated) _moonPredResults.Dispose();
+            if (_moonPredSampleTimes.IsCreated) _moonPredSampleTimes.Dispose();
+            if (_moonPredFramePositions.IsCreated) _moonPredFramePositions.Dispose();
+            if (_moonPredOrbits.IsCreated) _moonPredOrbits.Dispose();
         }
     }
 }
