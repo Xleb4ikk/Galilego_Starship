@@ -2573,7 +2573,7 @@ namespace Galilego.Physics
                     continue;
                 }
 
-                ApplyVisualScale(visual, rail.Radius);
+                //ApplyVisualScale(visual, rail.Radius);
 
                 // Evaluate moon state at preview time (does not mutate simulation state)
                 EvaluateMoonState(rail, previewTime, out Vector3d moonPos, out Vector3d moonVel);
