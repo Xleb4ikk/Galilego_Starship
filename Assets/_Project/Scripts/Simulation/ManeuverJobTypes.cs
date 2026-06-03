@@ -57,6 +57,17 @@ namespace Galilego.Simulation
     }
 
     [StructLayout(LayoutKind.Sequential)]
+    public struct TrajectoryCheckpoint
+    {
+        public double3 Position;
+        public double3 Velocity;
+        public double Time;
+        public int NodeVersion;
+        public int EphemerisVersion;
+        public int EphemerisIndex;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
     public struct ChunkConfig
     {
         public double StartTime;

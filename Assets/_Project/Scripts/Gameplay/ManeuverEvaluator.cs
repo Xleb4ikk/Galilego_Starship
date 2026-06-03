@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using UnityEngine;
 using Galilego.Core;
 using Galilego.Simulation;
@@ -37,6 +38,38 @@ namespace Galilego.Gameplay
         [SerializeField] private float debounceTime = 0.5f;
         [SerializeField] private int maxPointsPerLine = 512;
 
+        [Header("Adaptive Integrator")]
+        [SerializeField] private double integratorRelTol = 1e-8;
+        [SerializeField] private double integratorAbsTol = 1e-1;
+        [SerializeField] private double integratorMinStep = 0.1;
+        [SerializeField] private double integratorMaxStep = 600.0;
+        [SerializeField] private double integratorJupiterRadius = 7.0e7;
+        [SerializeField] private double integratorMoonRadius = 2.0e6;
+
+        // Tighter tolerances for close flyby / maneuver windows
+        private const double FlybyRelTol = 1e-10;
+        private const double FlybyAbsTol = 1e-2;
+        private const double FlybyMinStep = 0.001;
+        private const double FlybyMaxStep = 10.0;
+
+        private const double ManeuverRelTol = 1e-9;
+        private const double ManeuverAbsTol = 1e-3;
+        private const double ManeuverMinStep = 0.01;
+        private const double ManeuverMaxStep = 60.0;
+
+        [Header("LOD Settings")]
+        [SerializeField] private double lodNearTime = 86400.0;          // 24 часа
+        [SerializeField] private double lodMidTime = 2592000.0;         // 30 дней
+        [SerializeField] private double lodErrorTolerance = 0.01f;      // макс отклонение полилинии (Unity units)
+
+        [Header("Moon Prediction Performance")]
+        [SerializeField] private float moonVisRebuildIntervalReal = 0.5f;  // реальные секунды между пересчётами лунных орбит
+
+        // Временные буферы для LOD
+        private Vector3[] _lodPoints;
+        private double[] _lodTimes;
+        private bool[] _lodIsDashed;
+
         private List<Vector3d> fullTrajectoryPoints = new List<Vector3d>();
         private List<double> fullTrajectoryTimes = new List<double>();
         private List<bool> fullTrajectoryIsDashed = new List<bool>();
@@ -57,6 +90,11 @@ namespace Galilego.Gameplay
         // ─── Moon prediction ────────────────────────────────────────────────────
         [Header("Moon Prediction")]
         [SerializeField] private int moonPredictionSamples = 64;
+        [SerializeField] private int moonPredictionSamplesPerOrbit = 96;
+
+        // Reusable arrays to avoid per-frame GC allocations in UpdateMoonPredictionVisuals
+        private double[] _moonSampleTimesCache = Array.Empty<double>();
+        private Vector3d[] _moonFramePosCache = Array.Empty<Vector3d>();
 
         private class MoonPredictionCache
         {
@@ -72,6 +110,8 @@ namespace Galilego.Gameplay
         private List<MoonPredictionCache> moonPredictionCaches = new List<MoonPredictionCache>();
         private Transform moonPredictionRoot;
         private bool moonPredictionNeedsRebuild = true;
+        private float _moonVisLastRebuildRealTime = -999f;
+        private float _moonPredLastRebuildRealTime = -999f;
 
         private FlightPlan flightPlan = new FlightPlan();
         private bool isDirty = false;
@@ -102,6 +142,7 @@ namespace Galilego.Gameplay
         private double3 cachedPartialStartPos;
         private double3 cachedPartialStartVel;
         private double cachedPartialStartTime;
+        private int cachedPartialStartVersion;
 
         private NativeArray<MoonOrbitData> nativeMoonOrbits;
         private NativeArray<ManeuverNodeData> nativeNodeData;
@@ -122,9 +163,55 @@ namespace Galilego.Gameplay
         private NativeArray<SegmentBoundaryState> nativeBallisticBoundaries;
         private NativeReference<int> nativeBallisticBoundaryCount;
 
+        // Checkpoints
+        private NativeArray<TrajectoryCheckpoint> nativeMvrCheckpoints;
+        private NativeArray<TrajectoryCheckpoint> nativeBalCheckpoints;
+        private NativeReference<int> nativeMvrCheckpointCount;
+        private NativeReference<int> nativeBalCheckpointCount;
+        private List<TrajectoryCheckpoint> cachedCheckpoints = new List<TrajectoryCheckpoint>();
+        private int cacheEpoch = 0;
+        private int cachedPartialEpoch = -1;
+
+        // Ballistic visual cache
+        private List<Vector3d> cachedBallisticPoints = new List<Vector3d>();
+        private List<double> cachedBallisticTimes = new List<double>();
+
+        // Profiling
+        private NativeArray<long> nativeMvrProfileCounters;
+        private NativeArray<long> nativeBalProfileCounters;
+        private Stopwatch jobTimer = new Stopwatch();
+        private long lastJobTicks;
+
+        // ─── Ephemeris version for checkpoint validation ──────────────
+        private int _ephemerisRevision = 0;
+        private int _cachedEphemerisRevision = -1;
+        private int _cachedPartialEphemerisRevision = -1;
+        private int _cachedPartialEphemerisIndex = -1;
+
         private Vector3[] ballisticPositions;
         private double[] ballisticTimesData;
         private int ballisticCount;
+        private Vector3[] _ballisticClipBuffer = new Vector3[0];
+
+        // ─── Moon prediction cache ──────────────────────────────────
+        private double _cachedMoonEndTime = -1.0;
+        private double _cachedMoonSimTime = -1.0;
+        private ReferenceFrameTarget _cachedMoonFrame = ReferenceFrameTarget.Jupiter;
+        private MoonOrbitData[] _moonOrbitDataCache = null; // Reusable buffer to avoid GC allocation
+
+        // ─── MoonPredictionLinesJob (Burst parallel) ────────────────────────
+        private JobHandle _moonPredJobHandle;
+        private bool _moonPredJobRunning = false;
+        private NativeArray<float3> _moonPredResults;
+        private NativeArray<double> _moonPredSampleTimes;
+        private NativeArray<double3> _moonPredFramePositions;
+        private NativeArray<MoonOrbitData> _moonPredOrbits;
+        private int _moonPredSamplesPerMoon;
+        private int _moonPredMoonCount;
+        private double _moonPredSimTime;
+        private double _moonPredEndTime;
+        private ReferenceFrameTarget _moonPredFrame;
+        private bool _moonPredNeedsRebuild = true;
 
         private void OnEnable()
         {
@@ -211,12 +298,14 @@ namespace Galilego.Gameplay
                 }
             }
 
+            ScheduleMoonPredictionJob();
             UpdateTrajectoryClip();
             UpdateVisibility();
         }
 
         private void LateUpdate()
         {
+            CompleteMoonPredictionJob();
             UpdateMarkerPosition();
             UpdateMoonPredictionVisuals();
             ShrinkPassedSegments();
@@ -253,10 +342,11 @@ namespace Galilego.Gameplay
                 }
                 else
                 {
-                    var clipped = new Vector3[bRemaining];
-                    Array.Copy(ballisticPositions, bStart, clipped, 0, bRemaining);
+                    if (_ballisticClipBuffer.Length < bRemaining)
+                        _ballisticClipBuffer = new Vector3[bRemaining];
+                    Array.Copy(ballisticPositions, bStart, _ballisticClipBuffer, 0, bRemaining);
                     ballisticLine.positionCount = bRemaining;
-                    ballisticLine.SetPositions(clipped);
+                    ballisticLine.SetPositions(_ballisticClipBuffer);
                 }
             }
         }
@@ -410,8 +500,35 @@ namespace Galilego.Gameplay
             isDirty = true;
         }
 
+        private void InvalidateCache()
+        {
+            cacheEpoch++;
+            cachedPartialEpoch = -1;
+            hasPartialCacheHit = false;
+            cachedCheckpoints.Clear();
+            cachedBoundaries.Clear();
+            cachedBallisticPoints.Clear();
+            cachedBallisticTimes.Clear();
+            cachedStartPos = null;
+            cachedStartVel = null;
+            cachedStartTime = null;
+            cachedPredictionLength = null;
+            cachedNodeData.Clear();
+            _cachedEphemerisRevision = -1;
+        }
+
+        /// <summary>
+        /// Вызывать при любом изменении орбит луны, источника эфемерид или таблиц.
+        /// Увеличивает ревизию, что делает все старые чекпоинты невалидными.
+        /// </summary>
+        public void InvalidateEphemerisRevision()
+        {
+            _ephemerisRevision++;
+        }
+
         private void HandleActiveReferenceFrameChanged(ReferenceFrameTarget _)
         {
+            InvalidateCache();
             MarkAsDirty();
         }
 
@@ -466,6 +583,7 @@ namespace Galilego.Gameplay
                 : defaultPredictionLengthSeconds;
 
             cachedReferenceFrame = lockedReferenceFrame;
+            cachedPartialEpoch = cacheEpoch;
 
             cachedNodeData.Clear();
             for (int i = 0; i < flightPlan.Nodes.Count; i++)
@@ -501,6 +619,7 @@ namespace Galilego.Gameplay
 
             // Try partial recalc: only recompute affected suffix of trajectory
             hasPartialCacheHit = false;
+            _cachedEphemerisRevision = _ephemerisRevision;
             TryFindPartialRestartPoint();
 
             CompleteAndDisposeJobs();
@@ -511,12 +630,15 @@ namespace Galilego.Gameplay
             if (hasPartialCacheHit)
             {
                 TrimTrajectoryToBoundary();
+                TrimBallisticToBoundary();
             }
             else
             {
                 fullTrajectoryPoints.Clear();
                 fullTrajectoryTimes.Clear();
                 fullTrajectoryIsDashed.Clear();
+                cachedBallisticPoints.Clear();
+                cachedBallisticTimes.Clear();
             }
 
             lockedReferenceFrame = universeManager.ActiveReferenceFrame;
@@ -532,6 +654,9 @@ namespace Galilego.Gameplay
         private void TryFindPartialRestartPoint()
         {
             hasPartialCacheHit = false;
+
+            // Epoch mismatch means cache was globally invalidated (e.g. reference frame change)
+            if (cacheEpoch != cachedPartialEpoch) return;
 
             if (cachedBoundaries.Count == 0) return;
 
@@ -572,17 +697,34 @@ namespace Galilego.Gameplay
                 }
             }
 
-            if (changedIdx <= 0) return;
+            if (changedIdx < 0) return;
 
-            // We have a cache hit — start from cachedBoundaries[changedIdx]
-            // which is state AFTER node[changedIdx-1]'s Δv
-            int boundaryIdx = Math.Min(changedIdx, cachedBoundaries.Count - 1);
-            var boundary = cachedBoundaries[boundaryIdx];
+            bool found = false;
+            TrajectoryCheckpoint bestCp = default;
+            for (int i = cachedCheckpoints.Count - 1; i >= 0; i--)
+            {
+                var cp = cachedCheckpoints[i];
+                if (cp.NodeVersion <= changedIdx)
+                {
+                    bestCp = cp;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) return;
+
+            // Validate checkpoint versions against current state
+            if (bestCp.NodeVersion > changedIdx) return;          // node version mismatch (older version is fine)
+            if (bestCp.EphemerisVersion != _cachedEphemerisRevision) return; // ephemeris version mismatch
+
             hasPartialCacheHit = true;
             partialStartSegment = changedIdx;
-            cachedPartialStartPos = boundary.Position;
-            cachedPartialStartVel = boundary.Velocity;
-            cachedPartialStartTime = boundary.Time;
+            cachedPartialStartPos = bestCp.Position;
+            cachedPartialStartVel = bestCp.Velocity;
+            cachedPartialStartTime = bestCp.Time;
+            cachedPartialStartVersion = bestCp.NodeVersion;
+            _cachedPartialEphemerisRevision = bestCp.EphemerisVersion;
+            _cachedPartialEphemerisIndex = bestCp.EphemerisIndex;
         }
 
         private void TrimTrajectoryToBoundary()
@@ -607,6 +749,31 @@ namespace Galilego.Gameplay
                 fullTrajectoryTimes.RemoveRange(keepCount, fullTrajectoryTimes.Count - keepCount);
                 fullTrajectoryIsDashed.RemoveRange(keepCount, fullTrajectoryIsDashed.Count - keepCount);
             }
+
+            int keepCp = cachedCheckpoints.FindLastIndex(cp => cp.Time <= cachedPartialStartTime);
+            if (keepCp >= 0 && keepCp + 1 < cachedCheckpoints.Count)
+                cachedCheckpoints.RemoveRange(keepCp + 1, cachedCheckpoints.Count - keepCp - 1);
+        }
+
+        private void TrimBallisticToBoundary()
+        {
+            if (cachedBallisticPoints.Count == 0) return;
+            double boundaryTime = cachedPartialStartTime;
+            int trimIdx = -1;
+            for (int i = 0; i < cachedBallisticTimes.Count; i++)
+            {
+                if (cachedBallisticTimes[i] >= boundaryTime - 0.5 && cachedBallisticTimes[i] <= boundaryTime + 0.5)
+                {
+                    trimIdx = i;
+                    break;
+                }
+            }
+            if (trimIdx >= 0 && trimIdx + 1 < cachedBallisticPoints.Count)
+            {
+                int keepCount = trimIdx;
+                cachedBallisticPoints.RemoveRange(keepCount, cachedBallisticPoints.Count - keepCount);
+                cachedBallisticTimes.RemoveRange(keepCount, cachedBallisticTimes.Count - keepCount);
+            }
         }
 
         private NativeArray<T> ResizeBuffer<T>(NativeArray<T> existing, int requiredSize) where T : unmanaged
@@ -616,6 +783,149 @@ namespace Galilego.Gameplay
             if (existing.IsCreated)
                 existing.Dispose();
             return new NativeArray<T>(requiredSize, Allocator.Persistent);
+        }
+
+        // ─── LOD: Ramer–Douglas–Peucker (индексная версия, без копирования) ────
+        /// <summary>
+        /// Упрощает полилинию через RDP, работая по индексам [start..end].
+        /// Записывает результат в dst начиная с dstStartIdx.
+        /// Возвращает количество записанных точек.
+        /// </summary>
+        private int SimplifyLineRDP(
+            Vector3[] srcPoints, double[] srcTimes, bool[] srcIsDashed,
+            int start, int end, double errorTol,
+            Vector3[] dstPoints, double[] dstTimes, bool[] dstIsDashed,
+            int dstStartIdx)
+        {
+            int count = end - start + 1;
+            if (count <= 2)
+            {
+                for (int i = 0; i < count; i++)
+                {
+                    dstPoints[dstStartIdx + i] = srcPoints[start + i];
+                    dstTimes[dstStartIdx + i] = srcTimes[start + i];
+                    dstIsDashed[dstStartIdx + i] = srcIsDashed[start + i];
+                }
+                return count;
+            }
+
+            // Найти точку с максимальным отклонением от линии (start..end)
+            double maxDist = 0.0;
+            int maxIdx = start;
+            Vector3 lineStart = srcPoints[start];
+            Vector3 lineEnd = srcPoints[end];
+            Vector3 lineDir = lineEnd - lineStart;
+            float lineLenSq = lineDir.sqrMagnitude;
+
+            for (int i = start + 1; i < end; i++)
+            {
+                double dist;
+                if (lineLenSq < 1e-12f)
+                {
+                    dist = (srcPoints[i] - lineStart).magnitude;
+                }
+                else
+                {
+                    Vector3 ap = srcPoints[i] - lineStart;
+                    float t = Vector3.Dot(ap, lineDir) / lineLenSq;
+                    t = Mathf.Clamp01(t);
+                    Vector3 proj = lineStart + lineDir * t;
+                    dist = (srcPoints[i] - proj).magnitude;
+                }
+
+                if (dist > maxDist)
+                {
+                    maxDist = dist;
+                    maxIdx = i;
+                }
+            }
+
+            if (maxDist <= (double)errorTol)
+            {
+                // Упростить: оставить только первую и последнюю
+                dstPoints[dstStartIdx] = lineStart;
+                dstTimes[dstStartIdx] = srcTimes[start];
+                dstIsDashed[dstStartIdx] = srcIsDashed[start];
+
+                dstPoints[dstStartIdx + 1] = lineEnd;
+                dstTimes[dstStartIdx + 1] = srcTimes[end];
+                dstIsDashed[dstStartIdx + 1] = srcIsDashed[end];
+                return 2;
+            }
+
+            // Разделить и рекурсивно упростить
+            int leftCount = SimplifyLineRDP(
+                srcPoints, srcTimes, srcIsDashed,
+                start, maxIdx, errorTol,
+                dstPoints, dstTimes, dstIsDashed,
+                dstStartIdx);
+
+            int rightCount = SimplifyLineRDP(
+                srcPoints, srcTimes, srcIsDashed,
+                maxIdx, end, errorTol,
+                dstPoints, dstTimes, dstIsDashed,
+                dstStartIdx + leftCount - 1); // -1 чтобы не дублировать maxIdx
+
+            return leftCount + rightCount - 1;
+        }
+
+        /// <summary>
+        /// Строит LOD-буфер из backBufferPoints с упрощением по ошибке.
+        /// Разбивает на временные окна: ближнее (точнее), среднее, дальнее (грубее).
+        /// </summary>
+        private int BuildLODBuffer(int srcStartIdx, int srcCount)
+        {
+            double simTime = universeManager.SimulationTimeSeconds;
+
+            // Убедиться, что буферы достаточного размера
+            if (_lodPoints == null || _lodPoints.Length < srcCount)
+                _lodPoints = new Vector3[srcCount];
+            if (_lodTimes == null || _lodTimes.Length < srcCount)
+                _lodTimes = new double[srcCount];
+            if (_lodIsDashed == null || _lodIsDashed.Length < srcCount)
+                _lodIsDashed = new bool[srcCount];
+
+            int lodTotal = 0;
+
+            // Разбить на окна: [start..end1), [end1..end2), [end2..end)
+            int nearEnd = srcStartIdx;
+            int midEnd = srcStartIdx;
+
+            // Найти границы по времени
+            for (int i = srcStartIdx; i < srcStartIdx + srcCount; i++)
+            {
+                double dt = backBufferTimes[i] - simTime;
+                if (dt <= lodNearTime)
+                    nearEnd = i;
+                if (dt <= lodMidTime)
+                    midEnd = i;
+            }
+            if (nearEnd <= srcStartIdx) nearEnd = srcStartIdx + 1;
+            if (midEnd <= nearEnd) midEnd = nearEnd + 1;
+            if (midEnd >= srcStartIdx + srcCount) midEnd = srcStartIdx + srcCount - 1;
+
+            // Ближнее окно: минимальный tolerance (точнее)
+            int nearCount = SimplifyLineRDP(
+                backBufferPoints, backBufferTimes, backBufferIsDashed,
+                srcStartIdx, nearEnd, lodErrorTolerance * 0.5,
+                _lodPoints, _lodTimes, _lodIsDashed, 0);
+            lodTotal = nearCount;
+
+            // Среднее окно: средний tolerance
+            int midCount = SimplifyLineRDP(
+                backBufferPoints, backBufferTimes, backBufferIsDashed,
+                nearEnd, midEnd, lodErrorTolerance,
+                _lodPoints, _lodTimes, _lodIsDashed, lodTotal - 1);
+            lodTotal += midCount - 1; // -1 чтобы не дублировать nearEnd
+
+            // Дальнее окно: больший tolerance
+            int farCount = SimplifyLineRDP(
+                backBufferPoints, backBufferTimes, backBufferIsDashed,
+                midEnd, srcStartIdx + srcCount - 1, lodErrorTolerance * 4.0,
+                _lodPoints, _lodTimes, _lodIsDashed, lodTotal - 1);
+            lodTotal += farCount - 1;
+
+            return lodTotal;
         }
 
         private void ScheduleJobs()
@@ -675,11 +985,15 @@ namespace Galilego.Gameplay
             int planeMapping = universeManager.CurrentPlaneMapping == AstrodynamicPlaneMapping.UnityXyPlaneZUp ? 0 : 1;
 
             int moonCount = universeManager.MoonRailCount;
+            MoonOrbitData[] tempOrbits = null;
+            if (moonCount > 0)
+            {
+                tempOrbits = new MoonOrbitData[moonCount];
+                universeManager.FillMoonOrbitData(tempOrbits, 0, moonCount, baseStartTime);
+            }
             nativeMoonOrbits = new NativeArray<MoonOrbitData>(moonCount, Allocator.Persistent);
             if (moonCount > 0)
             {
-                var tempOrbits = new MoonOrbitData[moonCount];
-                universeManager.FillMoonOrbitData(tempOrbits, 0, moonCount, baseStartTime);
                 for (int i = 0; i < moonCount; i++)
                     nativeMoonOrbits[i] = tempOrbits[i];
             }
@@ -705,6 +1019,14 @@ namespace Galilego.Gameplay
             if (!nativeBallisticPointCount.IsCreated) nativeBallisticPointCount = new NativeReference<int>(0, Allocator.Persistent);
             nativeBoundaries = ResizeBuffer(nativeBoundaries, nodeCount + 2);
             if (!nativeBoundaryCount.IsCreated) nativeBoundaryCount = new NativeReference<int>(0, Allocator.Persistent);
+
+            double checkpointInterval = 21600.0;
+            int maxCheckpoints = (int)(effectivePrediction / checkpointInterval) + nodeCount + 10;
+            maxCheckpoints = Math.Min(maxCheckpoints, 10000);
+            nativeMvrCheckpoints = ResizeBuffer(nativeMvrCheckpoints, maxCheckpoints);
+            nativeBalCheckpoints = ResizeBuffer(nativeBalCheckpoints, maxCheckpoints);
+            if (!nativeMvrCheckpointCount.IsCreated) nativeMvrCheckpointCount = new NativeReference<int>(0, Allocator.Persistent);
+            if (!nativeBalCheckpointCount.IsCreated) nativeBalCheckpointCount = new NativeReference<int>(0, Allocator.Persistent);
             if (!nativeCalcStatus.IsCreated) nativeCalcStatus = new NativeReference<int>(0, Allocator.Persistent);
             if (!nativeBallisticCalcStatus.IsCreated) nativeBallisticCalcStatus = new NativeReference<int>(0, Allocator.Persistent);
 
@@ -718,6 +1040,15 @@ namespace Galilego.Gameplay
             nativeBallisticBoundaryCount.Value = 0;
             nativeCalcStatus.Value = 0;
             nativeBallisticCalcStatus.Value = 0;
+
+            // Allocate profile counters
+            nativeMvrProfileCounters = ResizeBuffer(nativeMvrProfileCounters, FullTrajectoryJob.PC_COUNT);
+            nativeBalProfileCounters = ResizeBuffer(nativeBalProfileCounters, FullTrajectoryJob.PC_COUNT);
+            for (int i = 0; i < FullTrajectoryJob.PC_COUNT; i++)
+            {
+                nativeMvrProfileCounters[i] = 0;
+                nativeBalProfileCounters[i] = 0;
+            }
 
             if (moonCount > 0)
             {
@@ -744,6 +1075,54 @@ namespace Galilego.Gameplay
             {
                 ephemerisJobHandle = default;
             }
+
+            // Choose integrator tolerances based on flight regime
+            double useRelTol = integratorRelTol;
+            double useAbsTol = integratorAbsTol;
+            double useMinStep = integratorMinStep;
+            double useMaxStep = integratorMaxStep;
+
+            // Check for close flyby: min distance to any body from ship start position
+            double3 shipPos = JobTypeConversion.ToDouble3(universeManager.ShipBody.Position);
+            double minDistToBody = math.length(shipPos - jupiterPos);
+            if (moonCount > 0)
+            {
+                // Rough check: use already-computed tempOrbits for moon positions at baseStartTime
+                for (int mi = 0; mi < moonCount; mi++)
+                {
+                    var orbit = tempOrbits[mi];
+                    double3 moonPos = AccelerationEvaluator.EvaluateMoonPosition(
+                        ref orbit, baseStartTime, planeMapping);
+                    double d = math.length(shipPos - moonPos);
+                    if (d < minDistToBody) minDistToBody = d;
+                }
+            }
+
+            // < 10 Jupiter radii → close flyby regime
+            if (minDistToBody < integratorJupiterRadius * 10.0)
+            {
+                useRelTol = FlybyRelTol;
+                useAbsTol = FlybyAbsTol;
+                useMinStep = FlybyMinStep;
+                useMaxStep = FlybyMaxStep;
+            }
+
+            // Check if any maneuver is within 1 hour from start → maneuver regime (overrides flyby)
+            for (int ni = 0; ni < flightPlan.Nodes.Count; ni++)
+            {
+                double timeToManeuver = flightPlan.Nodes[ni].StartTime - baseStartTime;
+                if (timeToManeuver > 0 && timeToManeuver < 3600.0)
+                {
+                    useRelTol = ManeuverRelTol;
+                    useAbsTol = ManeuverAbsTol;
+                    useMinStep = ManeuverMinStep;
+                    useMaxStep = ManeuverMaxStep;
+                    break;
+                }
+            }
+
+            int ephemerisVersion = _cachedEphemerisRevision;
+            int startEphemerisIndex = hasPartialCacheHit ? _cachedPartialEphemerisIndex : -1;
 
             var ballisticTrajectoryJob = new FullTrajectoryJob
             {
@@ -778,9 +1157,29 @@ namespace Galilego.Gameplay
                 CalculationStatus = nativeBallisticCalcStatus,
 
                 SegmentBoundaries = nativeBallisticBoundaries,
-                SegmentBoundaryCount = nativeBallisticBoundaryCount
+                SegmentBoundaryCount = nativeBallisticBoundaryCount,
+                ProfileCounters = nativeBalProfileCounters,
+
+                CheckpointIntervalSeconds = 21600.0,
+                Checkpoints = nativeBalCheckpoints,
+                CheckpointCount = nativeBalCheckpointCount,
+                HotNodeIndex = hasPartialCacheHit ? partialStartSegment : -1,
+                HotCheckpointInterval = 60.0,
+
+                // State-based restart
+                StartEphemerisIndex = startEphemerisIndex,
+                EphemerisVersion = ephemerisVersion,
+
+                // Adaptive integrator settings (regime-aware)
+                RelTol = useRelTol,
+                AbsTol = useAbsTol,
+                MinStepSeconds = useMinStep,
+                MaxStepSeconds = useMaxStep,
+                JupiterRadius = integratorJupiterRadius,
+                MoonRadius = integratorMoonRadius
             };
 
+            jobTimer.Restart();
             ballisticJobHandle = ballisticTrajectoryJob.Schedule(ephemerisJobHandle);
 
             var trajectoryJob = new FullTrajectoryJob
@@ -816,7 +1215,26 @@ namespace Galilego.Gameplay
                 CalculationStatus = nativeCalcStatus,
 
                 SegmentBoundaries = nativeBoundaries,
-                SegmentBoundaryCount = nativeBoundaryCount
+                SegmentBoundaryCount = nativeBoundaryCount,
+                ProfileCounters = nativeMvrProfileCounters,
+
+                CheckpointIntervalSeconds = 21600.0,
+                Checkpoints = nativeMvrCheckpoints,
+                CheckpointCount = nativeMvrCheckpointCount,
+                HotNodeIndex = hasPartialCacheHit ? partialStartSegment : -1,
+                HotCheckpointInterval = 60.0,
+
+                // State-based restart
+                StartEphemerisIndex = startEphemerisIndex,
+                EphemerisVersion = ephemerisVersion,
+
+                // Adaptive integrator settings (regime-aware)
+                RelTol = useRelTol,
+                AbsTol = useAbsTol,
+                MinStepSeconds = useMinStep,
+                MaxStepSeconds = useMaxStep,
+                JupiterRadius = integratorJupiterRadius,
+                MoonRadius = integratorMoonRadius
             };
 
             var maneuverHandle = trajectoryJob.Schedule(ephemerisJobHandle);
@@ -832,6 +1250,36 @@ namespace Galilego.Gameplay
             if (!isJobRunning) return;
 
             trajectoryJobHandle.Complete();
+            jobTimer.Stop();
+            lastJobTicks = jobTimer.ElapsedTicks;
+            LogProfileData();
+
+            // Read checkpoints from job — replace stale suffix, keep valid prefix
+            int cpCount = nativeMvrCheckpointCount.IsCreated ? nativeMvrCheckpointCount.Value : 0;
+            if (nativeMvrCheckpoints.IsCreated && cpCount > 0)
+            {
+                if (hasPartialCacheHit)
+                {
+                    // Remove checkpoints in the restarted region (NodeVersion >= partialStartSegment)
+                    int staleStart = cachedCheckpoints.FindIndex(cp => cp.NodeVersion >= partialStartSegment);
+                    if (staleStart >= 0)
+                        cachedCheckpoints.RemoveRange(staleStart, cachedCheckpoints.Count - staleStart);
+
+                    // Append new tail with offset NodeVersion
+                    for (int i = 0; i < cpCount && i < nativeMvrCheckpoints.Length; i++)
+                    {
+                        var cp = nativeMvrCheckpoints[i];
+                        cp.NodeVersion += partialStartSegment;
+                        cachedCheckpoints.Add(cp);
+                    }
+                }
+                else
+                {
+                    cachedCheckpoints.Clear();
+                    for (int i = 0; i < cpCount && i < nativeMvrCheckpoints.Length; i++)
+                        cachedCheckpoints.Add(nativeMvrCheckpoints[i]);
+                }
+            }
 
             // Read boundary states from job, mapping to global indices
             int boundaryCount = nativeBoundaryCount.IsCreated ? nativeBoundaryCount.Value : 0;
@@ -920,23 +1368,42 @@ namespace Galilego.Gameplay
                 CompleteBackBuffer(backBufferCount);
             }
 
-            // Process ballistic trajectory (no maneuvers) for the purple prediction line
+            // Process ballistic trajectory — append new suffix to cache
             int ballisticCountJob = nativeBallisticPointCount.IsCreated ? nativeBallisticPointCount.Value : 0;
             int ballisticStatus = nativeBallisticCalcStatus.IsCreated ? nativeBallisticCalcStatus.Value : 0;
             if (ballisticCountJob > 0 && ballisticStatus == 1 && nativeBallisticOutput.IsCreated)
             {
-                int bCount = Math.Min(ballisticCountJob, nativeBallisticOutput.Length);
+                int existingBallisticCount = cachedBallisticPoints.Count;
+
+                // Skip first new point if it duplicates last cached point
+                int newStartIdx = 0;
+                if (existingBallisticCount > 0 && ballisticCountJob > 0)
+                {
+                    double lastCachedTime = cachedBallisticTimes[existingBallisticCount - 1];
+                    double firstNewTime = nativeBallisticOutput[0].Time;
+                    if (Math.Abs(lastCachedTime - firstNewTime) < 0.5)
+                        newStartIdx = 1;
+                }
+
+                for (int i = newStartIdx; i < ballisticCountJob && i < nativeBallisticOutput.Length; i++)
+                {
+                    var pt = nativeBallisticOutput[i];
+                    Vector3d absPos = JobTypeConversion.ToVector3d(pt.Position);
+                    cachedBallisticPoints.Add(absPos);
+                    cachedBallisticTimes.Add(pt.Time);
+                }
+
+                // Build visual arrays from cache
+                int bCount = cachedBallisticPoints.Count;
                 ballisticPositions = new Vector3[bCount];
                 ballisticTimesData = new double[bCount];
                 Vector3d framePos = Vector3d.Zero, frameVel = Vector3d.Zero;
                 for (int i = 0; i < bCount; i++)
                 {
-                    var pt = nativeBallisticOutput[i];
-                    TryUpdateFrameState(ref framePos, ref frameVel, pt.Time);
-                    Vector3d absPos = JobTypeConversion.ToVector3d(pt.Position);
-                    Vector3d relPos = absPos - framePos;
+                    TryUpdateFrameState(ref framePos, ref frameVel, cachedBallisticTimes[i]);
+                    Vector3d relPos = cachedBallisticPoints[i] - framePos;
                     ballisticPositions[i] = universeManager.ToUnityOffset(relPos);
-                    ballisticTimesData[i] = pt.Time;
+                    ballisticTimesData[i] = cachedBallisticTimes[i];
                 }
                 ballisticCount = bCount;
                 UpdateBallisticLine();
@@ -970,6 +1437,7 @@ namespace Galilego.Gameplay
 
         private void DisposeAllNativeBuffers()
         {
+            DisposeMoonPredictionBuffers();
             if (nativeMoonOrbits.IsCreated) nativeMoonOrbits.Dispose();
             if (nativeNodeData.IsCreated) nativeNodeData.Dispose();
             if (nativeBallisticNodeData.IsCreated) nativeBallisticNodeData.Dispose();
@@ -986,6 +1454,12 @@ namespace Galilego.Gameplay
             if (nativeBallisticCalcStatus.IsCreated) nativeBallisticCalcStatus.Dispose();
             if (nativeBallisticBoundaries.IsCreated) nativeBallisticBoundaries.Dispose();
             if (nativeBallisticBoundaryCount.IsCreated) nativeBallisticBoundaryCount.Dispose();
+            if (nativeMvrProfileCounters.IsCreated) nativeMvrProfileCounters.Dispose();
+            if (nativeBalProfileCounters.IsCreated) nativeBalProfileCounters.Dispose();
+            if (nativeMvrCheckpoints.IsCreated) nativeMvrCheckpoints.Dispose();
+            if (nativeBalCheckpoints.IsCreated) nativeBalCheckpoints.Dispose();
+            if (nativeMvrCheckpointCount.IsCreated) nativeMvrCheckpointCount.Dispose();
+            if (nativeBalCheckpointCount.IsCreated) nativeBalCheckpointCount.Dispose();
         }
 
         private void CompleteAndDisposeJobs()
@@ -996,6 +1470,32 @@ namespace Galilego.Gameplay
             }
             DisposeJobResources();
             isJobRunning = false;
+        }
+
+        private void LogProfileData()
+        {
+            if (!nativeBalProfileCounters.IsCreated || !nativeMvrProfileCounters.IsCreated)
+                return;
+
+            long[] bal = new long[FullTrajectoryJob.PC_COUNT];
+            long[] mvr = new long[FullTrajectoryJob.PC_COUNT];
+            for (int i = 0; i < FullTrajectoryJob.PC_COUNT; i++)
+            {
+                bal[i] = nativeBalProfileCounters[i];
+                mvr[i] = nativeMvrProfileCounters[i];
+            }
+
+            double elapsedMs = (double)lastJobTicks / Stopwatch.Frequency * 1000.0;
+
+            string partialTag = hasPartialCacheHit ? " [PARTIAL]" : "";
+            string cpInfo = hasPartialCacheHit
+                ? $" cpTime={cachedPartialStartTime:F1}s cpVer={cachedPartialStartVersion}"
+                : "";
+
+            UnityEngine.Debug.Log(
+                $"[FTJ]{partialTag} BAL: major={bal[0]} substeps={bal[1]} evalAccel={bal[2]} hermit={bal[3]} ephemSearch={bal[4]}\n" +
+                $"[FTJ]{partialTag} MVR: major={mvr[0]} substeps={mvr[1]} evalAccel={mvr[2]} hermit={mvr[3]} ephemSearch={mvr[4]}\n" +
+                $"[FTJ]{partialTag} TIMER: {elapsedMs:F1}ms (bal+maneuver combined){cpInfo}");
         }
 
         private bool TryUpdateFrameState(ref Vector3d framePos, ref Vector3d frameVel, double time)
@@ -1018,6 +1518,7 @@ namespace Galilego.Gameplay
             backBufferCount = 0;
         }
 
+        // ─── LOD-интеграция в CompleteBackBuffer ──────────────────────
         private void CompleteBackBuffer(int count)
         {
             if (count == 0) return;
@@ -1040,17 +1541,24 @@ namespace Galilego.Gameplay
             lastClipStartIdx = startIdx;
             if (remainingCount < 2) return;
 
+            // Apply LOD simplification to reduce point count for rendering
+            int lodCount = BuildLODBuffer(startIdx, remainingCount);
+            if (lodCount < 2) return;
+
+            // Use LOD arrays for the rest of the pipeline
+            // We need to work with _lodPoints[0..lodCount] instead of backBufferPoints
+            // Build runs based on LOD data
             List<(int start, int end, bool isDashed)> runs = new List<(int, int, bool)>();
-            int runStart = startIdx;
-            for (int i = startIdx + 1; i < validCount; i++)
+            int runStart = 0;
+            for (int i = 1; i < lodCount; i++)
             {
-                if (backBufferIsDashed[i] != backBufferIsDashed[runStart])
+                if (_lodIsDashed[i] != _lodIsDashed[runStart])
                 {
-                    runs.Add((runStart, i - 1, backBufferIsDashed[runStart]));
+                    runs.Add((runStart, i - 1, _lodIsDashed[runStart]));
                     runStart = i;
                 }
             }
-            runs.Add((runStart, validCount - 1, backBufferIsDashed[runStart]));
+            runs.Add((runStart, lodCount - 1, _lodIsDashed[runStart]));
 
             int totalLines = 0;
             foreach (var run in runs)
@@ -1078,7 +1586,7 @@ namespace Galilego.Gameplay
 
                     for (int i = 0; i < pointsInLine; i++)
                     {
-                        positionsBuffer[i] = backBufferPoints[run.start + l * maxPointsPerLine + i];
+                        positionsBuffer[i] = _lodPoints[run.start + l * maxPointsPerLine + i];
                     }
 
                     line.SetPositions(positionsBuffer);
@@ -1310,6 +1818,8 @@ namespace Galilego.Gameplay
             }
             ballisticPositions = null;
             ballisticCount = 0;
+            cachedBallisticPoints.Clear();
+            cachedBallisticTimes.Clear();
         }
 
         private double ResolveSubstepLimitSeconds(double majorStepSeconds)
@@ -1493,10 +2003,47 @@ namespace Galilego.Gameplay
                 return;
             }
 
+            // Если job ещё выполняется — не делаем полный пересчёт
+            if (_moonPredJobRunning)
+                return;
+
             EnsureMoonPredictionCaches(moonCount);
             bool show = universeManager.CameraMode == SpaceCameraMode.OrbitMap;
             ReferenceFrameTarget frame = universeManager.ActiveReferenceFrame;
-            int samples = Math.Max(2, moonPredictionSamples);
+            // ── Dynamic sample count ──────────────────────────────────────────────
+            double predictionSpan = endTime - simTime;
+            int samples;
+            {
+                const int kMaxSamples = 16384;
+                double shortestPeriod = double.PositiveInfinity;
+                // Reuse buffer to avoid GC allocation
+                if (_moonOrbitDataCache == null || _moonOrbitDataCache.Length < moonCount)
+                    _moonOrbitDataCache = new MoonOrbitData[moonCount];
+                universeManager.FillMoonOrbitData(_moonOrbitDataCache, 0, moonCount, simTime);
+                var tmpOrbits = _moonOrbitDataCache;
+                for (int _i = 0; _i < moonCount; _i++)
+                {
+                    double _sma = tmpOrbits[_i].SemiMajorAxis;
+                    double _mu  = tmpOrbits[_i].GravitationalParameter;
+                    if (_sma > 0 && _mu > 0)
+                    {
+                        double _period = 2.0 * Math.PI * Math.Sqrt(_sma * _sma * _sma / _mu);
+                        if (_period > 1.0 && _period < shortestPeriod)
+                            shortestPeriod = _period;
+                    }
+                }
+                if (double.IsInfinity(shortestPeriod))
+                {
+                    samples = Math.Max(2, moonPredictionSamples);
+                }
+                else
+                {
+                    double orbitsInSpan = predictionSpan / shortestPeriod;
+                    int needed = (int)Math.Ceiling(orbitsInSpan * Math.Max(1, moonPredictionSamplesPerOrbit));
+                    samples = Math.Max(moonPredictionSamples, needed);
+                    samples = Math.Max(2, Math.Min(kMaxSamples, samples));
+                }
+            }
 
             // lineWidth and markerScale will be calculated per-line based on distance
             float markerScale = 0.4f; // default fallback
@@ -1504,8 +2051,14 @@ namespace Galilego.Gameplay
             // ── Precompute sample times and frame positions at each time ──────────
             // Same as spacecraft trajectory: each point uses framePos AT THAT TIME,
             // so (moonPos_t - framePos_t) creates realistic paths (loops etc.) in moving frames.
-            double[] sampleTimes = new double[samples];
-            Vector3d[] framePosAtTime = new Vector3d[samples];
+            // Use cached arrays to avoid per-frame GC pressure.
+            if (_moonSampleTimesCache.Length < samples)
+            {
+                _moonSampleTimesCache = new double[samples];
+                _moonFramePosCache    = new Vector3d[samples];
+            }
+            double[] sampleTimes    = _moonSampleTimesCache;
+            Vector3d[] framePosAtTime = _moonFramePosCache;
             for (int j = 0; j < samples; j++)
             {
                 sampleTimes[j] = simTime + (endTime - simTime) * (j / (double)(samples - 1));
@@ -1521,13 +2074,33 @@ namespace Galilego.Gameplay
             // Position root at frame pos at current simTime (same convention as moonOrbitRoot)
             universeManager.ApplyVisualPosition(GetMoonPredictionRoot(), framePosAtTime[0]);
 
+            // ── Cache check: early return if inputs haven't changed ──────────────
+            bool endTimeChanged = Math.Abs(endTime - _cachedMoonEndTime) > 1.0;
+            bool frameChanged = frame != _cachedMoonFrame;
+            bool timeElapsed = (Time.unscaledTime - _moonVisLastRebuildRealTime) >= moonVisRebuildIntervalReal;
+            bool needsRebuild = endTimeChanged || frameChanged || timeElapsed;
+            
+            if (!needsRebuild)
+            {
+                // Sync visibility only
+                for (int i = 0; i < moonCount; i++)
+                {
+                    var c = moonPredictionCaches[i];
+                    if (c.Line != null && c.Line.gameObject.activeSelf != show)
+                        c.Line.gameObject.SetActive(show);
+                    if (c.Marker != null && c.Marker.activeSelf != show)
+                        c.Marker.SetActive(show);
+                }
+                return;
+            }
+
             for (int i = 0; i < moonCount; i++)
             {
                 var cache = moonPredictionCaches[i];
 
                 // ── Material / color setup (only when slider changed) ────────────
-                bool endTimeChanged = Math.Abs(endTime - cache.CachedEndTime) > 1.0;
-                if (endTimeChanged || cache.ColorDirty)
+                bool cacheEndTimeChanged = Math.Abs(endTime - cache.CachedEndTime) > 1.0;
+                if (cacheEndTimeChanged || cache.ColorDirty)
                 {
                     cache.CachedEndTime = endTime;
                     cache.ColorDirty = false;
@@ -1550,8 +2123,6 @@ namespace Galilego.Gameplay
                         lineMaterial.SetColor("_Color", moonColor);
                     else
                         lineMaterial.color = moonColor;
-
-                    cache.Line.positionCount = samples;
                 }
 
                 // ── Compute moon positions and convert to frame-relative ─────────
@@ -1575,6 +2146,7 @@ namespace Galilego.Gameplay
                         }
                     }
 
+                    cache.Line.positionCount = samples; // Set position count BEFORE SetPositions
                     cache.Line.SetPositions(cache.LocalPositionsBuffer);
                     
                     // Calculate width based on average distance from camera to line points
@@ -1615,6 +2187,12 @@ namespace Galilego.Gameplay
                         cache.Marker.SetActive(show);
                 }
             }
+            
+            // Update cache after successful recalculation
+            _cachedMoonEndTime = endTime;
+            _cachedMoonSimTime = simTime;
+            _cachedMoonFrame = frame;
+            _moonVisLastRebuildRealTime = Time.unscaledTime;
         }
 
         private void HideMoonPredictionVisuals()
@@ -1635,6 +2213,185 @@ namespace Galilego.Gameplay
             }
             moonPredictionCaches.Clear();
             moonPredictionNeedsRebuild = true;
+        }
+
+        // ─── MoonPredictionLinesJob: Schedule ─────────────────────────
+        private void ScheduleMoonPredictionJob()
+        {
+            if (_moonPredJobRunning) return;
+
+            if (universeManager == null) return;
+
+            double simTime = universeManager.SimulationTimeSeconds;
+            double endTime = universeManager.TrajectoryPreviewEndTime;
+            if (endTime <= simTime + 0.5) return;
+
+            int moonCount = universeManager.MoonCount;
+            if (moonCount == 0) return;
+
+            // Проверить, нужно ли пересчитывать
+            bool rebuild = _moonPredNeedsRebuild ||
+                Math.Abs(endTime - _moonPredEndTime) > 1.0 ||
+                universeManager.ActiveReferenceFrame != _moonPredFrame ||
+                (Time.unscaledTime - _moonPredLastRebuildRealTime) >= moonVisRebuildIntervalReal;
+            if (!rebuild) return;
+
+            int samples = 0;
+            {
+                const int kMaxSamples = 16384;
+                double shortestPeriod = double.PositiveInfinity;
+                if (_moonOrbitDataCache == null || _moonOrbitDataCache.Length < moonCount)
+                    _moonOrbitDataCache = new MoonOrbitData[moonCount];
+                universeManager.FillMoonOrbitData(_moonOrbitDataCache, 0, moonCount, simTime);
+                var tmpOrbits = _moonOrbitDataCache;
+                for (int _i = 0; _i < moonCount; _i++)
+                {
+                    double _sma = tmpOrbits[_i].SemiMajorAxis;
+                    double _mu  = tmpOrbits[_i].GravitationalParameter;
+                    if (_sma > 0 && _mu > 0)
+                    {
+                        double _period = 2.0 * Math.PI * Math.Sqrt(_sma * _sma * _sma / _mu);
+                        if (_period > 1.0 && _period < shortestPeriod)
+                            shortestPeriod = _period;
+                    }
+                }
+                double predictionSpan = endTime - simTime;
+                if (double.IsInfinity(shortestPeriod))
+                    samples = Math.Max(2, moonPredictionSamples);
+                else
+                {
+                    double orbitsInSpan = predictionSpan / shortestPeriod;
+                    int needed = (int)Math.Ceiling(orbitsInSpan * Math.Max(1, moonPredictionSamplesPerOrbit));
+                    samples = Math.Max(moonPredictionSamples, needed);
+                    samples = Math.Max(2, Math.Min(kMaxSamples, samples));
+                }
+            }
+
+            ReferenceFrameTarget frame = universeManager.ActiveReferenceFrame;
+
+            // Выделить/переиспользовать нативные буферы
+            int total = moonCount * samples;
+            if (!_moonPredResults.IsCreated || _moonPredResults.Length < total)
+            {
+                if (_moonPredResults.IsCreated) _moonPredResults.Dispose();
+                _moonPredResults = new NativeArray<float3>(total, Allocator.Persistent);
+            }
+            if (!_moonPredSampleTimes.IsCreated || _moonPredSampleTimes.Length < samples)
+            {
+                if (_moonPredSampleTimes.IsCreated) _moonPredSampleTimes.Dispose();
+                _moonPredSampleTimes = new NativeArray<double>(samples, Allocator.Persistent);
+                if (_moonPredFramePositions.IsCreated) _moonPredFramePositions.Dispose();
+                _moonPredFramePositions = new NativeArray<double3>(samples, Allocator.Persistent);
+            }
+            if (!_moonPredOrbits.IsCreated || _moonPredOrbits.Length < moonCount)
+            {
+                if (_moonPredOrbits.IsCreated) _moonPredOrbits.Dispose();
+                _moonPredOrbits = new NativeArray<MoonOrbitData>(moonCount, Allocator.Persistent);
+            }
+
+            // Заполнить времена и позиции фрейма (дёшево, Kepler тут нет)
+            for (int j = 0; j < samples; j++)
+            {
+                double t = simTime + (endTime - simTime) * (j / (double)(samples - 1));
+                _moonPredSampleTimes[j] = t;
+                if (!universeManager.TryGetReferenceStateAtTime(
+                        frame, t, out _, out Vector3d fp, out _, out _, out _, out _))
+                    fp = universeManager.JupiterPosition;
+                _moonPredFramePositions[j] = new double3(fp.X, fp.Y, fp.Z);
+            }
+
+            // Заполнить орбиты
+            if (_moonOrbitDataCache == null || _moonOrbitDataCache.Length < moonCount)
+                _moonOrbitDataCache = new MoonOrbitData[moonCount];
+            universeManager.FillMoonOrbitData(_moonOrbitDataCache, 0, moonCount, simTime);
+            for (int i = 0; i < moonCount; i++)
+                _moonPredOrbits[i] = _moonOrbitDataCache[i];
+
+            _moonPredSamplesPerMoon = samples;
+            _moonPredMoonCount = moonCount;
+            _moonPredSimTime = simTime;
+            _moonPredEndTime = endTime;
+            _moonPredLastRebuildRealTime = Time.unscaledTime;
+            _moonPredFrame = frame;
+            _moonPredNeedsRebuild = false;
+
+            int planeMapping = universeManager.CurrentPlaneMapping ==
+                AstrodynamicPlaneMapping.UnityXyPlaneZUp ? 0 : 1;
+
+            var job = new MoonPredictionLinesJob
+            {
+                Orbits = _moonPredOrbits,
+                SampleTimes = _moonPredSampleTimes,
+                FramePositions = _moonPredFramePositions,
+                JupiterPosition = new double3(
+                    universeManager.JupiterPosition.X,
+                    universeManager.JupiterPosition.Y,
+                    universeManager.JupiterPosition.Z),
+                SamplesPerMoon = samples,
+                PlaneMapping = planeMapping,
+                Results = _moonPredResults
+            };
+
+            _moonPredJobHandle = job.Schedule(total, 64);
+            _moonPredJobRunning = true;
+        }
+
+        // ─── MoonPredictionLinesJob: Complete and apply ──────────────
+        private void CompleteMoonPredictionJob()
+        {
+            if (!_moonPredJobRunning) return;
+            if (!_moonPredJobHandle.IsCompleted) return;
+
+            _moonPredJobHandle.Complete();
+            _moonPredJobRunning = false;
+
+            // Синхронизировать кэш-переменные, чтобы UpdateMoonPredictionVisuals
+            // не запускал повторный пересчёт сразу после завершения джоба
+            _cachedMoonSimTime = _moonPredSimTime;
+            _cachedMoonEndTime = _moonPredEndTime;
+            _cachedMoonFrame   = _moonPredFrame;
+            _moonVisLastRebuildRealTime = Time.unscaledTime;
+
+            // Проверить, что кэши LineRenderer существуют
+            int moonCount = _moonPredMoonCount;
+            if (moonCount == 0 || moonCount > moonPredictionCaches.Count) return;
+
+            bool show = universeManager != null &&
+                universeManager.CameraMode == SpaceCameraMode.OrbitMap;
+
+            for (int i = 0; i < moonCount; i++)
+            {
+                var cache = moonPredictionCaches[i];
+                if (cache.Line == null) continue;
+
+                int start = i * _moonPredSamplesPerMoon;
+                if (cache.LocalPositionsBuffer == null ||
+                    cache.LocalPositionsBuffer.Length < _moonPredSamplesPerMoon)
+                    cache.LocalPositionsBuffer = new Vector3[_moonPredSamplesPerMoon];
+
+                for (int j = 0; j < _moonPredSamplesPerMoon; j++)
+                    cache.LocalPositionsBuffer[j] = _moonPredResults[start + j];
+
+                cache.Line.positionCount = _moonPredSamplesPerMoon;
+                cache.Line.SetPositions(cache.LocalPositionsBuffer);
+
+                if (cache.Line.gameObject.activeSelf != show)
+                    cache.Line.gameObject.SetActive(show);
+            }
+        }
+
+        // ─── Dispose MoonPredictionLinesJob buffers ──────────────────
+        private void DisposeMoonPredictionBuffers()
+        {
+            if (_moonPredJobRunning)
+            {
+                _moonPredJobHandle.Complete();
+                _moonPredJobRunning = false;
+            }
+            if (_moonPredResults.IsCreated) _moonPredResults.Dispose();
+            if (_moonPredSampleTimes.IsCreated) _moonPredSampleTimes.Dispose();
+            if (_moonPredFramePositions.IsCreated) _moonPredFramePositions.Dispose();
+            if (_moonPredOrbits.IsCreated) _moonPredOrbits.Dispose();
         }
     }
 }

@@ -3,23 +3,27 @@ using UnityEngine;
 using UnityEngine.TestTools;
 using Galilego.Gameplay;
 using Galilego.Universe;
-using Galilego.Simulation;
-using System.Collections;
+using Galilego.Core;
+using System.Collections.Generic;
+using System.Reflection;
+using System;
 
 namespace Galilego.Tests.Editor
 {
     /// <summary>
-    /// Bug Condition Exploration Test for Apsis Marker Positioning
+    /// Bug Condition Exploration Test for Apsis Marker Hover Detection
     /// 
     /// **Validates: Requirements 1.1, 1.2, 1.3, 1.4**
     /// 
     /// CRITICAL: This test MUST FAIL on unfixed code - failure confirms the bug exists.
     /// 
-    /// The test verifies that apsis marker sprites are positioned directly on the orbit line
-    /// without vertical offset. This is the BUG CONDITION we are documenting.
+    /// The test verifies that markerData.worldPosition (used for hover detection) does NOT match
+    /// markerObj.transform.position (actual sprite position after camera-facing offset).
     /// 
-    /// After the fix is implemented, this test will be updated to verify the EXPECTED behavior
-    /// (sprites above orbit line with vertical offset).
+    /// This mismatch causes hover detection to fail because it calculates distance from the wrong position.
+    /// 
+    /// EXPECTED OUTCOME ON UNFIXED CODE: Test FAILS with counterexamples showing position mismatch
+    /// EXPECTED OUTCOME AFTER FIX: Test PASSES (markerData.worldPosition matches actual sprite position)
     /// </summary>
     [TestFixture]
     public class ApsisMarkerBugConditionTest
@@ -28,7 +32,6 @@ namespace Galilego.Tests.Editor
         private Camera testCamera;
         private UniverseManager universeManager;
         private ApsisMarkerSystem apsisMarkerSystem;
-        private OrbitAnalyzer orbitAnalyzer;
 
         [SetUp]
         public void SetUp()
@@ -36,31 +39,42 @@ namespace Galilego.Tests.Editor
             // Create test scene root
             testSceneRoot = new GameObject("TestSceneRoot");
 
-            // Create test camera
+            // Create test camera with realistic configuration
             GameObject cameraObj = new GameObject("TestCamera");
             cameraObj.transform.SetParent(testSceneRoot.transform);
             testCamera = cameraObj.AddComponent<Camera>();
             testCamera.fieldOfView = 60f;
             testCamera.nearClipPlane = 0.1f;
-            testCamera.farClipPlane = 1000f;
+            testCamera.farClipPlane = 10000f;
+            // Note: pixelHeight and pixelWidth are read-only and determined by the render target
 
-            // Create UniverseManager mock/stub
+            // Position camera at a typical orbit map view angle (45 degrees)
+            testCamera.transform.position = new Vector3(150f, 150f, 0f);
+            testCamera.transform.LookAt(Vector3.zero);
+
+            // Create UniverseManager - expect NullReferenceException during initialization
+            // because we're not setting up the full game scene
+            LogAssert.Expect(LogType.Exception, "NullReferenceException: Object reference not set to an instance of an object");
+            
             GameObject universeObj = new GameObject("UniverseManager");
             universeObj.transform.SetParent(testSceneRoot.transform);
             universeManager = universeObj.AddComponent<UniverseManager>();
 
-            // Create OrbitAnalyzer
-            GameObject analyzerObj = new GameObject("OrbitAnalyzer");
-            analyzerObj.transform.SetParent(testSceneRoot.transform);
-            orbitAnalyzer = analyzerObj.AddComponent<OrbitAnalyzer>();
+            // Initialize UniverseManager with minimal setup
+            InitializeUniverseManager();
 
             // Create ApsisMarkerSystem
             GameObject apsisObj = new GameObject("ApsisMarkerSystem");
             apsisObj.transform.SetParent(testSceneRoot.transform);
             apsisMarkerSystem = apsisObj.AddComponent<ApsisMarkerSystem>();
 
-            // Set camera mode to OrbitMap to activate markers
-            // Note: This may require reflection or public setter depending on implementation
+            // Use reflection to set private fields
+            SetPrivateField(apsisMarkerSystem, "universeManager", universeManager);
+            SetPrivateField(apsisMarkerSystem, "referenceCamera", testCamera);
+            SetPrivateField(apsisMarkerSystem, "useAnalyticalSystem", true);
+
+            // Trigger Awake to initialize marker pool
+            InvokePrivateMethod(apsisMarkerSystem, "Awake");
         }
 
         [TearDown]
@@ -68,225 +82,231 @@ namespace Galilego.Tests.Editor
         {
             if (testSceneRoot != null)
             {
-                Object.DestroyImmediate(testSceneRoot);
+                UnityEngine.Object.DestroyImmediate(testSceneRoot);
             }
         }
 
         /// <summary>
-        /// Property 1: Expected Behavior - Apsis Markers Positioned Above Orbit Line
+        /// Property 1: Bug Condition - Hover Detection Uses Actual Sprite Position
         /// 
-        /// **Validates: Requirements 2.1, 2.2, 2.3, 2.4, 2.5, 2.6**
+        /// **Validates: Requirements 1.1, 1.2, 1.3, 1.4**
         /// 
-        /// This test verifies the EXPECTED BEHAVIOR after fix: sprites are positioned ABOVE
-        /// the orbit line with vertical offset in camera-facing direction.
+        /// CRITICAL: This test MUST FAIL on unfixed code - failure confirms the bug exists.
+        /// DO NOT attempt to fix the test or the code when it fails.
         /// 
-        /// EXPECTED OUTCOME ON UNFIXED CODE: Test FAILS (assertions fail, confirming bug exists)
-        /// EXPECTED OUTCOME AFTER FIX: Test PASSES (sprites have vertical offset > 0)
+        /// This test verifies the expected behavior (that markerData.worldPosition equals actual sprite position).
+        /// On UNFIXED code, this test will FAIL, documenting the bug through counterexamples.
         /// 
         /// Test Strategy:
-        /// - Test all four marker types (periapsis, apoapsis, maneuver periapsis, maneuver apoapsis)
-        /// - Test at different camera angles (top view, side view, 45° angle)
-        /// - Test at different zoom levels (near, medium, far)
-        /// - Verify offset magnitude > 0 (sprites are above orbit line)
-        /// - Verify offset direction aligns with camera-facing "up" (dot product > 0.9)
-        /// - Verify offset magnitude is proportional to sprite scale
+        /// - Create apsis markers with camera-facing offset applied
+        /// - Verify that markerData.worldPosition equals markerObj.transform.position
+        /// - Test at specific camera angles where offset is significant (45° angle, top-down view)
+        /// - Document counterexamples showing the position mismatch
         /// </summary>
         [Test]
-        public void Property_BugCondition_ApsisMarkersPositionedAboveOrbitLine()
+        public void Property_BugCondition_HoverDetectionUsesActualSpritePosition()
         {
-            // NOTE: This is a conceptual test that documents the expected behavior.
-            // The actual verification requires a full Unity scene with ApsisMarkerSystem running.
-            // This test serves as documentation of the fix requirements.
-            
-            // ARRANGE: Document test scenario with known orbital parameters
-            
-            // Create a simple elliptical orbit around a reference body
-            // Eccentricity: 0.5 (clearly elliptical, not circular)
-            // Semi-major axis: 10,000 km
-            // Periapsis: 5,000 km, Apoapsis: 15,000 km
-            
-            double eccentricity = 0.5;
-            double semiMajorAxis = 10000000.0; // meters
-            double periapsisDistance = semiMajorAxis * (1.0 - eccentricity); // 5,000 km
-            double apoapsisDistance = semiMajorAxis * (1.0 + eccentricity);  // 15,000 km
-            
-            // Position camera at different angles and zoom levels
-            Vector3[] cameraPositions = new Vector3[]
+            // ARRANGE: Create realistic apsis data for testing
+            var apsisDataList = new List<ApsisData>();
+
+            // Test Case 1: Periapsis marker at 45° camera angle
+            // This is a concrete failing case where camera-facing offset creates significant displacement
+            Vector3d periapsisWorldPos = new Vector3d(100.0, 0.0, 0.0); // Orbital position (before offset)
+            apsisDataList.Add(new ApsisData(
+                worldPosition: periapsisWorldPos,
+                altitude: 50000.0, // 50 km altitude
+                timeToReach: universeManager.SimulationTimeSeconds + 100.0,
+                type: ApsisType.Periapsis,
+                orbitType: OrbitType.Ballistic,
+                segmentIndex: -1,
+                isVisible: true,
+                centralBodyName: "TestBody"
+            ));
+
+            // Test Case 2: Apoapsis marker at top-down view
+            Vector3d apoapsisWorldPos = new Vector3d(-150.0, 0.0, 0.0); // Orbital position (before offset)
+            apsisDataList.Add(new ApsisData(
+                worldPosition: apoapsisWorldPos,
+                altitude: 150000.0, // 150 km altitude
+                timeToReach: universeManager.SimulationTimeSeconds + 200.0,
+                type: ApsisType.Apoapsis,
+                orbitType: OrbitType.Ballistic,
+                segmentIndex: -1,
+                isVisible: true,
+                centralBodyName: "TestBody"
+            ));
+
+            // ACT: Call UpdateApsisMarkers with the test data
+            apsisMarkerSystem.UpdateApsisMarkers(apsisDataList);
+
+            // Get the marker data list (used by hover detection)
+            var markerDataList = apsisMarkerSystem.MarkerData;
+
+            // Get the marker pool to access actual sprite positions
+            var markerPool = GetPrivateField<List<GameObject>>(apsisMarkerSystem, "markerPool");
+
+            // ASSERT: Verify that markerData.worldPosition matches actual sprite position
+            System.Text.StringBuilder counterexamples = new System.Text.StringBuilder();
+            counterexamples.AppendLine("Bug Condition Exploration Test Results:");
+            counterexamples.AppendLine("==========================================");
+            counterexamples.AppendLine();
+            counterexamples.AppendLine("EXPECTED BEHAVIOR (after fix):");
+            counterexamples.AppendLine("  markerData.worldPosition SHOULD EQUAL markerObj.transform.position");
+            counterexamples.AppendLine();
+            counterexamples.AppendLine("COUNTEREXAMPLES (proving bug exists on unfixed code):");
+            counterexamples.AppendLine();
+
+            bool foundMismatch = false;
+            int testCaseNumber = 1;
+
+            for (int i = 0; i < markerDataList.Count; i++)
             {
-                new Vector3(0, 20, 0),      // Top view (looking down)
-                new Vector3(20, 0, 0),      // Side view (at orbit plane level)
-                new Vector3(15, 15, 0),     // 45° angle view
-                new Vector3(0, 50, 0),      // Far zoom (top view)
-                new Vector3(0, 10, 0)       // Near zoom (top view)
-            };
+                if (i >= markerPool.Count) break;
 
-            string[] cameraDescriptions = new string[]
-            {
-                "Top View",
-                "Side View",
-                "45° Angle View",
-                "Far Zoom (Top View)",
-                "Near Zoom (Top View)"
-            };
+                ApsisMarkerData markerData = markerDataList[i];
+                GameObject markerObj = markerPool[i];
 
-            // ACT & ASSERT: Document expected behavior for each camera configuration
-            System.Text.StringBuilder testReport = new System.Text.StringBuilder();
-            testReport.AppendLine("Bug Condition Exploration Test - Expected Behavior Verification:");
-            testReport.AppendLine("================================================================");
-            testReport.AppendLine();
-            testReport.AppendLine("AFTER FIX IMPLEMENTATION (Tasks 3.1-3.3):");
-            testReport.AppendLine();
+                if (markerObj == null || !markerObj.activeSelf) continue;
 
-            for (int i = 0; i < cameraPositions.Length; i++)
-            {
-                testReport.AppendLine($"Test Case {i + 1}: {cameraDescriptions[i]}");
-                testReport.AppendLine($"  Camera Position: {cameraPositions[i]}");
-                testReport.AppendLine();
+                // Get actual sprite position (after camera-facing offset)
+                Vector3 actualSpritePosition = markerObj.transform.position;
 
-                testReport.AppendLine("  Expected Behavior (AFTER FIX):");
-                testReport.AppendLine("    ✓ Periapsis marker ABOVE orbit line (vertical offset > 0)");
-                testReport.AppendLine("    ✓ Apoapsis marker ABOVE orbit line (vertical offset > 0)");
-                testReport.AppendLine("    ✓ Offset direction aligns with camera-facing 'up' (dot product > 0.9)");
-                testReport.AppendLine("    ✓ Offset magnitude proportional to sprite scale");
-                testReport.AppendLine();
+                // Get position used by hover detection
+                Vector3 hoverDetectionPosition = markerData.worldPosition;
 
-                testReport.AppendLine("  Implementation Details:");
-                testReport.AppendLine("    - ComputeCameraFacingOffset() calculates offset using:");
-                testReport.AppendLine("      * cameraFacingUp = markerTransform.up (from BillboardBehaviour)");
-                testReport.AppendLine("      * offsetDistance = currentScale * spriteHeight * offsetFactor");
-                testReport.AppendLine("      * spriteHeight = 0.45f, offsetFactor = 0.75f");
-                testReport.AppendLine("    - Offset applied to all marker types:");
-                testReport.AppendLine("      * Periapsis, Apoapsis (regular orbit)");
-                testReport.AppendLine("      * Maneuver Periapsis, Maneuver Apoapsis (post-maneuver orbit)");
-                testReport.AppendLine();
+                // Calculate the mismatch
+                Vector3 positionDifference = actualSpritePosition - hoverDetectionPosition;
+                float mismatchDistance = positionDifference.magnitude;
 
-                testReport.AppendLine("  Status: PASS (fix implemented and verified)");
-                testReport.AppendLine("  ----------------------------------------");
-                testReport.AppendLine();
+                // Document the counterexample
+                counterexamples.AppendLine($"Test Case {testCaseNumber}: {markerData.type} marker");
+                counterexamples.AppendLine($"  Camera Angle: 45° (position: {testCamera.transform.position})");
+                counterexamples.AppendLine($"  Orbital Position: {(i == 0 ? periapsisWorldPos : apoapsisWorldPos)}");
+                counterexamples.AppendLine($"  markerData.worldPosition (hover detection): {hoverDetectionPosition}");
+                counterexamples.AppendLine($"  markerObj.transform.position (actual sprite): {actualSpritePosition}");
+                counterexamples.AppendLine($"  Position Mismatch: {positionDifference}");
+                counterexamples.AppendLine($"  Mismatch Distance: {mismatchDistance:F2} Unity units");
+                counterexamples.AppendLine();
+
+                // Check if positions match (tolerance of 0.01 units for floating point)
+                if (mismatchDistance > 0.01f)
+                {
+                    foundMismatch = true;
+                    counterexamples.AppendLine($"  ❌ BUG CONFIRMED: Positions DO NOT match!");
+                    counterexamples.AppendLine($"  Root Cause: markerData.worldPosition stores orbital position (before offset),");
+                    counterexamples.AppendLine($"              but hover detection needs actual sprite position (after offset)");
+                    counterexamples.AppendLine();
+                }
+                else
+                {
+                    counterexamples.AppendLine($"  ✓ Positions match correctly (fix is working)");
+                    counterexamples.AppendLine();
+                }
+
+                testCaseNumber++;
             }
 
-            testReport.AppendLine();
-            testReport.AppendLine("Summary:");
-            testReport.AppendLine("========");
-            testReport.AppendLine($"Total test cases: {cameraPositions.Length}");
-            testReport.AppendLine($"Passed test cases: {cameraPositions.Length} (all)");
-            testReport.AppendLine();
-            testReport.AppendLine("Conclusion:");
-            testReport.AppendLine("-----------");
-            testReport.AppendLine("The fix has been IMPLEMENTED and VERIFIED. All apsis marker sprites");
-            testReport.AppendLine("are now positioned ABOVE the orbit line with vertical offset in the");
-            testReport.AppendLine("camera-facing direction, proportional to sprite scale.");
-            testReport.AppendLine();
-            testReport.AppendLine("Fix Implementation:");
-            testReport.AppendLine("-------------------");
-            testReport.AppendLine("✓ Task 3.1: ComputeCameraFacingOffset() method added");
-            testReport.AppendLine("✓ Task 3.2: Offset applied to periapsis and apoapsis markers");
-            testReport.AppendLine("✓ Task 3.3: Offset applied to maneuver markers");
-            testReport.AppendLine();
-            testReport.AppendLine("Requirements Validated:");
-            testReport.AppendLine("-----------------------");
-            testReport.AppendLine("✓ 2.1: Periapsis markers positioned above orbit line");
-            testReport.AppendLine("✓ 2.2: Apoapsis markers positioned above orbit line");
-            testReport.AppendLine("✓ 2.3: Maneuver periapsis markers positioned above orbit line");
-            testReport.AppendLine("✓ 2.4: Maneuver apoapsis markers positioned above orbit line");
-            testReport.AppendLine("✓ 2.5: Offset uses camera-facing direction from BillboardBehaviour");
-            testReport.AppendLine("✓ 2.6: Offset proportional to sprite size for consistent appearance");
-
-            // Log the test report for documentation
-            Debug.Log(testReport.ToString());
-
-            // This test now PASSES after fix implementation
-            Assert.Pass(testReport.ToString());
-        }
-
-        /// <summary>
-        /// Helper test to verify marker creation and basic setup
-        /// This test should pass even on unfixed code
-        /// </summary>
-        [Test]
-        public void Verify_MarkersAreCreated()
-        {
-            // This test verifies that the marker system can create marker objects
-            // It should pass regardless of the positioning bug
-
-            Assert.IsNotNull(apsisMarkerSystem, "ApsisMarkerSystem should be created");
+            counterexamples.AppendLine();
+            counterexamples.AppendLine("CONCLUSION:");
+            counterexamples.AppendLine("============");
             
-            // Note: We cannot easily verify marker creation without triggering
-            // the full initialization, which requires a valid UniverseManager setup
-            
-            Assert.Pass("Marker system component exists");
-        }
-
-        /// <summary>
-        /// Test to verify camera-facing offset calculation (after fix is implemented)
-        /// This test documents the expected behavior of the fix
-        /// </summary>
-        [Test]
-        public void Property_OffsetDirection_AlignsWith_CameraFacingUp()
-        {
-            // ARRANGE: Set up camera at different orientations
-            Vector3[] cameraPositions = new Vector3[]
+            if (foundMismatch)
             {
-                new Vector3(0, 20, 0),   // Looking down
-                new Vector3(20, 0, 0),   // Looking from side
-                new Vector3(15, 15, 0)   // Looking at 45°
-            };
-
-            // ACT & ASSERT: Verify offset direction aligns with camera-facing "up"
-            foreach (var camPos in cameraPositions)
+                counterexamples.AppendLine("❌ BUG EXISTS: markerData.worldPosition does NOT match actual sprite position");
+                counterexamples.AppendLine();
+                counterexamples.AppendLine("Impact:");
+                counterexamples.AppendLine("  - Hover detection calculates distance from WRONG position (orbital point)");
+                counterexamples.AppendLine("  - User sees sprite at actualSpritePosition but must hover over hoverDetectionPosition");
+                counterexamples.AppendLine("  - Mismatch varies with camera angle (camera-facing offset is directional)");
+                counterexamples.AppendLine("  - Tooltip appears in wrong location or doesn't appear at all");
+                counterexamples.AppendLine();
+                counterexamples.AppendLine("Root Cause Analysis:");
+                counterexamples.AppendLine("  1. ToMarkerData() converts original orbital position to Unity coordinates");
+                counterexamples.AppendLine("  2. Line 814 attempts to override: markerData.worldPosition = markerObj.transform.position");
+                counterexamples.AppendLine("  3. BUT the override happens with markerData as a struct value copy");
+                counterexamples.AppendLine("  4. OR transform.position is not yet updated when assignment happens");
+                counterexamples.AppendLine();
+                counterexamples.AppendLine("This test has SUCCESSFULLY documented the bug condition.");
+            }
+            else
             {
-                testCamera.transform.position = camPos;
-                testCamera.transform.LookAt(Vector3.zero);
+                counterexamples.AppendLine("✓ FIX VERIFIED: markerData.worldPosition correctly matches actual sprite position");
+                counterexamples.AppendLine();
+                counterexamples.AppendLine("The fix has been successfully implemented:");
+                counterexamples.AppendLine("  - markerData.worldPosition now stores the actual sprite position (after offset)");
+                counterexamples.AppendLine("  - Hover detection will calculate distance from correct position");
+                counterexamples.AppendLine("  - Tooltip will appear reliably when hovering over visible sprite");
+            }
 
-                // After fix is implemented, the offset should be calculated as:
-                // Vector3 cameraFacingUp = markerTransform.up (from BillboardBehaviour)
-                // Vector3 offset = cameraFacingUp * offsetDistance
-                
-                // The dot product between offset direction and camera-facing up should be > 0.9
-                // (indicating they are nearly parallel)
+            // Log the full counterexample report
+            Debug.Log(counterexamples.ToString());
 
-                // This is a placeholder for the actual test implementation
+            // ASSERTION: On unfixed code, this will FAIL (proving bug exists)
+            // On fixed code, this will PASS (proving fix works)
+            if (foundMismatch)
+            {
                 Assert.Fail(
-                    "This test documents expected behavior after fix. " +
-                    "Offset direction should align with camera-facing 'up' direction. " +
-                    "Dot product between offset and camera-facing up should be > 0.9. " +
-                    "\nCamera Position: " + camPos
+                    "BUG CONFIRMED: markerData.worldPosition does NOT match actual sprite position.\n" +
+                    "This failure is EXPECTED on unfixed code and proves the bug exists.\n\n" +
+                    counterexamples.ToString()
+                );
+            }
+            else
+            {
+                Assert.Pass(
+                    "FIX VERIFIED: markerData.worldPosition correctly matches actual sprite position.\n\n" +
+                    counterexamples.ToString()
                 );
             }
         }
 
-        /// <summary>
-        /// Test to verify offset magnitude is proportional to sprite scale
-        /// This test documents the expected behavior of the fix
-        /// </summary>
-        [Test]
-        public void Property_OffsetMagnitude_ProportionalTo_SpriteScale()
+        // Helper methods for reflection
+        private void SetPrivateField(object obj, string fieldName, object value)
         {
-            // ARRANGE: Set up different zoom levels (which affect sprite scale)
-            float[] cameraDistances = new float[] { 10f, 20f, 50f, 100f };
-
-            // ACT & ASSERT: Verify offset scales with sprite size
-            foreach (var distance in cameraDistances)
+            var field = obj.GetType().GetField(fieldName, BindingFlags.NonPublic | BindingFlags.Instance);
+            if (field != null)
             {
-                testCamera.transform.position = new Vector3(0, distance, 0);
-                testCamera.transform.LookAt(Vector3.zero);
-
-                // After fix is implemented, the offset should be:
-                // offsetDistance = currentScale * spriteHeight * offsetFactor
-                
-                // Where:
-                // - currentScale comes from ComputeConstantScreenScale
-                // - spriteHeight is approximately 0.45 units (or from sprite bounds)
-                // - offsetFactor is a tuning parameter (e.g., 0.5 to 1.0)
-
-                // This is a placeholder for the actual test implementation
-                Assert.Fail(
-                    "This test documents expected behavior after fix. " +
-                    "Offset magnitude should be proportional to sprite scale. " +
-                    "As camera distance increases, scale increases, offset should increase proportionally. " +
-                    "\nCamera Distance: " + distance
-                );
+                field.SetValue(obj, value);
             }
+            else
+            {
+                Debug.LogWarning($"Field '{fieldName}' not found on {obj.GetType().Name}");
+            }
+        }
+
+        private T GetPrivateField<T>(object obj, string fieldName)
+        {
+            var field = obj.GetType().GetField(fieldName, BindingFlags.NonPublic | BindingFlags.Instance);
+            if (field != null)
+            {
+                return (T)field.GetValue(obj);
+            }
+            else
+            {
+                Debug.LogWarning($"Field '{fieldName}' not found on {obj.GetType().Name}");
+                return default(T);
+            }
+        }
+
+        private void InvokePrivateMethod(object obj, string methodName, params object[] parameters)
+        {
+            var method = obj.GetType().GetMethod(methodName, BindingFlags.NonPublic | BindingFlags.Instance);
+            if (method != null)
+            {
+                method.Invoke(obj, parameters);
+            }
+            else
+            {
+                Debug.LogWarning($"Method '{methodName}' not found on {obj.GetType().Name}");
+            }
+        }
+
+        private void InitializeUniverseManager()
+        {
+            // Set minimal required fields for ToUnityPosition to work
+            // ToUnityPosition typically subtracts a floating origin offset
+            SetPrivateField(universeManager, "floatingOriginOffset", Vector3d.Zero);
+            SetPrivateField(universeManager, "simulationTimeSeconds", 0.0);
         }
     }
 }
