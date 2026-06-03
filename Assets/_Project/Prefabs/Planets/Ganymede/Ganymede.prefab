@@ -56,15 +56,15 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: -8679921383154817045, guid: 632c3696b38327243a9a055ba3502263, type: 3}
       propertyPath: m_LocalPosition.x
-      value: 107.7732
+      value: -0.002
       objectReference: {fileID: 0}
     - target: {fileID: -8679921383154817045, guid: 632c3696b38327243a9a055ba3502263, type: 3}
       propertyPath: m_LocalPosition.y
-      value: 0
+      value: -0
       objectReference: {fileID: 0}
     - target: {fileID: -8679921383154817045, guid: 632c3696b38327243a9a055ba3502263, type: 3}
       propertyPath: m_LocalPosition.z
-      value: -50.88201
+      value: 0.003
       objectReference: {fileID: 0}
     - target: {fileID: -8679921383154817045, guid: 632c3696b38327243a9a055ba3502263, type: 3}
       propertyPath: m_LocalRotation.w
@@ -138,7 +138,7 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: -8679921383154817045, guid: ca4c8528ffb4f4c47bdcb7f86484a98e, type: 3}
       propertyPath: m_LocalPosition.x
-      value: 107.7732
+      value: -0.002
       objectReference: {fileID: 0}
     - target: {fileID: -8679921383154817045, guid: ca4c8528ffb4f4c47bdcb7f86484a98e, type: 3}
       propertyPath: m_LocalPosition.y
@@ -146,7 +146,7 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: -8679921383154817045, guid: ca4c8528ffb4f4c47bdcb7f86484a98e, type: 3}
       propertyPath: m_LocalPosition.z
-      value: -50.88201
+      value: 0.003
       objectReference: {fileID: 0}
     - target: {fileID: -8679921383154817045, guid: ca4c8528ffb4f4c47bdcb7f86484a98e, type: 3}
       propertyPath: m_LocalRotation.w
@@ -186,7 +186,7 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: 919132149155446097, guid: ca4c8528ffb4f4c47bdcb7f86484a98e, type: 3}
       propertyPath: m_IsActive
-      value: 1
+      value: 0
       objectReference: {fileID: 0}
     m_RemovedComponents: []
     m_RemovedGameObjects: []
@@ -220,7 +220,7 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: -8679921383154817045, guid: 23a6c8d27764572429a44dfcf38c4bf9, type: 3}
       propertyPath: m_LocalPosition.x
-      value: 107.7732
+      value: -0.002
       objectReference: {fileID: 0}
     - target: {fileID: -8679921383154817045, guid: 23a6c8d27764572429a44dfcf38c4bf9, type: 3}
       propertyPath: m_LocalPosition.y
@@ -228,7 +228,7 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: -8679921383154817045, guid: 23a6c8d27764572429a44dfcf38c4bf9, type: 3}
       propertyPath: m_LocalPosition.z
-      value: -50.88201
+      value: 0.003
       objectReference: {fileID: 0}
     - target: {fileID: -8679921383154817045, guid: 23a6c8d27764572429a44dfcf38c4bf9, type: 3}
       propertyPath: m_LocalRotation.w
@@ -265,6 +265,10 @@ PrefabInstance:
     - target: {fileID: 919132149155446097, guid: 23a6c8d27764572429a44dfcf38c4bf9, type: 3}
       propertyPath: m_Name
       value: Ganymede_Medium
+      objectReference: {fileID: 0}
+    - target: {fileID: 919132149155446097, guid: 23a6c8d27764572429a44dfcf38c4bf9, type: 3}
+      propertyPath: m_IsActive
+      value: 0
       objectReference: {fileID: 0}
     m_RemovedComponents: []
     m_RemovedGameObjects: []

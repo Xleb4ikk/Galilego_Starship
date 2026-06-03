@@ -214,16 +214,17 @@ namespace Galilego.UI
             if (dvScrubValues != null && dvScrubValues.Count > 0 && flightPlan != null)
             {
                 int nodeCount = flightPlan.Nodes.Count;
-                bool anyDvScrub = false;
                 for (int i = 0; i < nodeCount; i++)
                 {
                     var node = flightPlan.Nodes[i];
+                    bool nodeChanged = false;
+                    
                     for (int axis = 0; axis < 3; axis++)
                     {
                         float scrVal = dvScrubValues[DvScrubIndex(i, axis)];
                         if (Mathf.Abs(scrVal) > 0.01f)
                         {
-                            anyDvScrub = true;
+                            nodeChanged = true;
                             double v = scrVal;
                             double effectivePos = v > 0 ? v * v : -(v * v);
                             double currentDv = axis == 0 ? node.DvPrograde : (axis == 1 ? node.DvNormal : node.DvRadial);
@@ -234,9 +235,18 @@ namespace Galilego.UI
                             else node.DvRadial = newDv;
                         }
                     }
+                    
+                    // ═══ NEW: Request instant preview for this maneuver ═══
+                    if (nodeChanged && evaluator != null)
+                    {
+                        evaluator.RequestInstantPreview(i, 
+                            node.DvPrograde, node.DvNormal, node.DvRadial);
+                    }
                 }
-                if (anyDvScrub)
-                    evaluator?.MarkAsDirtyLightweight();
+                
+                // ═══ REMOVED: MarkAsDirtyLightweight is now called inside RequestInstantPreview ═══
+                // if (anyDvScrub)
+                //     evaluator?.MarkAsDirtyLightweight();
             }
 
             // Reset scrub when mouse released anywhere (not just inside window)
