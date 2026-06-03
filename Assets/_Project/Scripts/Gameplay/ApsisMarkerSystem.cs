@@ -938,11 +938,12 @@ namespace Galilego.Gameplay
                 
                 // Temporary debug for green markers
                 #if UNITY_EDITOR
-                if (apsisData.orbitType == OrbitType.Maneuver)
-                {
-                    Vector3 screenPos = referenceCamera.WorldToScreenPoint(markerData.worldPosition);
-                    Debug.Log($"[GREEN MARKER {apsisData.type}] worldPos={markerData.worldPosition}, screenPos={screenPos}, orbitType={apsisData.orbitType}");
-                }
+                // Temporarily disabled to reduce console spam
+                // if (apsisData.orbitType == OrbitType.Maneuver)
+                // {
+                //     Vector3 screenPos = referenceCamera.WorldToScreenPoint(markerData.worldPosition);
+                //     Debug.Log($"[GREEN MARKER {apsisData.type}] worldPos={markerData.worldPosition}, screenPos={screenPos}, orbitType={apsisData.orbitType}");
+                // }
                 #endif
 
                 markerDataList.Add(markerData);
