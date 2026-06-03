@@ -1,9 +1,0 @@
-c:\MyData\UnityProj\Galilego_Starship\Galilego\Assets\.codex_tmp\bin\Assembly-CSharp.deps.json
-c:\MyData\UnityProj\Galilego_Starship\Galilego\Assets\.codex_tmp\bin\Assembly-CSharp.dll
-c:\MyData\UnityProj\Galilego_Starship\Galilego\Assets\.codex_tmp\bin\Assembly-CSharp.pdb
-c:\MyData\UnityProj\Galilego_Starship\Galilego\Assets\.codex_tmp\obj\Assembly-CSharp.csproj.AssemblyReference.cache
-c:\MyData\UnityProj\Galilego_Starship\Galilego\Assets\.codex_tmp\obj\Assembly-CSharp.GeneratedMSBuildEditorConfig.editorconfig
-c:\MyData\UnityProj\Galilego_Starship\Galilego\Assets\.codex_tmp\obj\Assembly-CSharp.csproj.CoreCompileInputs.cache
-c:\MyData\UnityProj\Galilego_Starship\Galilego\Assets\.codex_tmp\obj\Assembly-CSharp.sourcelink.json
-c:\MyData\UnityProj\Galilego_Starship\Galilego\Assets\.codex_tmp\obj\Assembly-CSharp.dll
-c:\MyData\UnityProj\Galilego_Starship\Galilego\Assets\.codex_tmp\obj\Assembly-CSharp.pdb
