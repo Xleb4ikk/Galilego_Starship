@@ -1942,6 +1942,7 @@ MonoBehaviour:
   autoRefresh: 1
   refreshIntervalSeconds: 0.15
   stepsPerBatch: 2048
+  usePredictorUnifiedIntegrator: 1
 --- !u!120 &598997629
 LineRenderer:
   serializedVersion: 3
@@ -2293,6 +2294,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::Galilego.Gameplay.FlightPlanUI
   evaluator: {fileID: 861880901}
   orbitAnalyzer: {fileID: 0}
+  executor: {fileID: 0}
   windowRect:
     serializedVersion: 2
     x: 16
@@ -5738,6 +5740,7 @@ MonoBehaviour:
   maxSolverStepSeconds: 1
   metersPerUnityUnit: 100000
   floatingOriginThreshold: 5000
+  useUnifiedIntegrator: 1
   selectedReferenceFrame: 0
   astrodynamicPlaneMapping: 0
   autoSelectSphereOfInfluence: 0

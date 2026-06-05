@@ -28,7 +28,15 @@ namespace Galilego.Simulation
             return BodyGravity(shipPos, bodyPos, bodySGP);
         }
 
-        private static double3 BodyGravity(double3 shipPos, double3 bodyPos, double sgp)
+        /// <summary>
+        /// Вычисляет гравитационное ускорение от одного тела.
+        /// Унифицированная реализация для использования во всех компонентах симуляции.
+        /// </summary>
+        /// <param name="shipPos">Позиция корабля</param>
+        /// <param name="bodyPos">Позиция небесного тела</param>
+        /// <param name="sgp">Standard Gravitational Parameter (μ = G * M)</param>
+        /// <returns>Вектор гравитационного ускорения</returns>
+        public static double3 BodyGravity(double3 shipPos, double3 bodyPos, double sgp)
         {
             if (sgp == 0.0) return double3.zero;
             double3 offset = bodyPos - shipPos;
@@ -150,6 +158,38 @@ namespace Galilego.Simulation
             double dt = tNext - tPrev;
             if (dt <= 0.0) return double3.zero;
             return (pNext - pPrev) / dt;
+        }
+
+        public static double3 HermiteInterpolateVelocity(
+            double3 p0, double3 v0,
+            double3 p1, double3 v1,
+            double t0, double t1, double t)
+        {
+            // Hermite interpolation derivative (velocity)
+            // p(t) = h00(u)*p0 + h10(u)*(t1-t0)*v0 + h01(u)*p1 + h11(u)*(t1-t0)*v1
+            // v(t) = dp/dt = (1/dt) * [h00'(u)*p0 + h10'(u)*(t1-t0)*v0 + h01'(u)*p1 + h11'(u)*(t1-t0)*v1]
+            
+            double dt = t1 - t0;
+            if (math.abs(dt) < 1e-9) return v0;
+            
+            double u = (t - t0) / dt;
+            u = math.clamp(u, 0.0, 1.0);
+            
+            // Hermite basis function derivatives
+            double h00_prime = 6.0 * u * u - 6.0 * u;           // d/du (2u³ - 3u² + 1)
+            double h10_prime = 3.0 * u * u - 4.0 * u + 1.0;     // d/du (u³ - 2u² + u)
+            double h01_prime = -6.0 * u * u + 6.0 * u;          // d/du (-2u³ + 3u²)
+            double h11_prime = 3.0 * u * u - 2.0 * u;           // d/du (u³ - u²)
+            
+            // v(t) = (1/dt) * [basis'(u) * control_points]
+            double3 result = (1.0 / dt) * (
+                h00_prime * p0 +
+                h10_prime * dt * v0 +
+                h01_prime * p1 +
+                h11_prime * dt * v1
+            );
+            
+            return result;
         }
     }
 }

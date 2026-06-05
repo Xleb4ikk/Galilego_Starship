@@ -1680,6 +1680,58 @@ namespace Galilego.Gameplay
                 ballisticCount = bCount;
                 UpdateBallisticLine();
             }
+            
+            // DEBUG: Find true closest approach (check EVERY point, not every 10th)
+            if (fullTrajectoryPoints.Count > 0)
+            {
+                double minDistToMoon = double.MaxValue;
+                int closestMoonIndex = -1;
+                double closestTime = 0;
+                Vector3d closestShipPos = Vector3d.Zero;
+                Vector3d closestMoonPos = Vector3d.Zero;
+                
+                int moonCount = universeManager.MoonRailCount;
+                for (int i = 0; i < fullTrajectoryPoints.Count; i++) // Check EVERY point
+                {
+                    double t = fullTrajectoryTimes[i];
+                    Vector3d shipPos = fullTrajectoryPoints[i];
+                    
+                    for (int m = 0; m < moonCount; m++)
+                    {
+                        if (universeManager.TryGetMoonPositionAtTime(m, t, out Vector3d moonPos))
+                        {
+                            double dist = (shipPos - moonPos).Magnitude;
+                            if (dist < minDistToMoon)
+                            {
+                                minDistToMoon = dist;
+                                closestMoonIndex = m;
+                                closestTime = t;
+                                closestShipPos = shipPos;
+                                closestMoonPos = moonPos;
+                            }
+                        }
+                    }
+                }
+                
+                // Log ANY close approach < 100,000 km
+                if (closestMoonIndex >= 0 && minDistToMoon < 100e6)
+                {
+                    string moonName = universeManager.GetMoonName(closestMoonIndex);
+                    double moonRadius = universeManager.GetMoonRadius(closestMoonIndex);
+                    double altitude = minDistToMoon - moonRadius;
+                    double soiRadius = universeManager.GetMoonSOI(closestMoonIndex);
+                    
+                    string severity = altitude <= 0 ? "IMPACT!!!" :
+                                     altitude < soiRadius ? "FLYBY" :
+                                     "distant";
+                    
+                    if (altitude < soiRadius * 5) // Log only interesting cases
+                    {
+                        UnityEngine.Debug.Log($"[{severity}] {moonName}: " +
+                            $"altitude={altitude/1e3:F0} km (SOI={soiRadius/1e3:F0} km) at t={closestTime:F1}s");
+                    }
+                }
+            }
 
             DisposeJobResources();
             isJobRunning = false;
@@ -2129,12 +2181,11 @@ namespace Galilego.Gameplay
 
         private Transform GetTrajectoryParent()
         {
-            Transform parent = null;
+            if (universeManager != null && universeManager.ManeuverTrajectoryRoot != null)
+                return universeManager.ManeuverTrajectoryRoot;
             if (universeManager != null && universeManager.TrajectoryVisualRoot != null)
-                parent = universeManager.TrajectoryVisualRoot;
-            else
-                parent = transform;
-            return parent;
+                return universeManager.TrajectoryVisualRoot;
+            return transform;
         }
 
         private void ClearLines()

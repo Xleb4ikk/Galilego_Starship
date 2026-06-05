@@ -38,6 +38,7 @@ namespace Galilego.UI
         [Header("References")]
         [SerializeField] private ManeuverEvaluator evaluator;
         [SerializeField] private OrbitAnalyzer orbitAnalyzer;
+        [SerializeField] private ManeuverExecutor executor;
 
         [Header("Window")]
         [SerializeField] private Rect windowRect = new Rect(16f, 16f, 460f, 700f);
@@ -110,8 +111,16 @@ namespace Galilego.UI
         private void Awake()
         {
             if (evaluator == null) evaluator = FindAnyObjectByType<ManeuverEvaluator>();
-            universeManager = FindAnyObjectByType<UniverseManager>();
+            if (universeManager == null) universeManager = FindAnyObjectByType<UniverseManager>();
             if (orbitAnalyzer == null) orbitAnalyzer = FindAnyObjectByType<OrbitAnalyzer>();
+            if (executor == null) executor = FindAnyObjectByType<ManeuverExecutor>();
+            
+            // Create ManeuverExecutor if not found
+            if (executor == null && evaluator != null)
+            {
+                executor = evaluator.gameObject.AddComponent<ManeuverExecutor>();
+                Debug.Log("[FlightPlanUI] ManeuverExecutor created automatically");
+            }
         }
 
         private void Start()
@@ -332,12 +341,14 @@ namespace Galilego.UI
             GUILayout.BeginVertical(styleSection);
             GUILayout.Label("FLIGHT PLAN", styleHeader);
 
-            double currentLength = flightPlan.PredictionLengthSeconds;
+            double currentTime = universeManager != null ? universeManager.SimulationTimeSeconds : 0;
+            double endTime = currentTime + flightPlan.PredictionLengthSeconds;
+            double remainingTime = flightPlan.PredictionLengthSeconds;
 
-            // Display current end time
+            // Display current end time (remaining time to end of prediction)
             GUILayout.BeginHorizontal();
             GUILayout.Label("End time:", styleLabel, GUILayout.Width(70));
-            GUILayout.Label(FormatDuration(currentLength), styleLabelGreen, GUILayout.Width(80));
+            GUILayout.Label(FormatDuration(remainingTime), styleLabelGreen, GUILayout.Width(80));
             GUILayout.FlexibleSpace();
             GUILayout.EndHorizontal();
 
@@ -530,6 +541,25 @@ namespace Galilego.UI
             {
                 showSettings = !showSettings;
             }
+            
+            // Execute next maneuver button
+            if (executor != null && flightPlan.Nodes.Count > 0)
+            {
+                var nextNode = flightPlan.Nodes[0];
+                bool isQueued = executor.IsQueued(0);
+                string btnLabel = isQueued ? "⏸ Cancel" : "▶ Execute Next";
+                Color btnColor = isQueued ? new Color(1f, 0.9f, 0.3f) : new Color(0.3f, 1f, 0.4f);
+                
+                GUI.backgroundColor = btnColor;
+                if (GUILayout.Button(btnLabel, styleButton, GUILayout.Width(110)))
+                {
+                    if (isQueued)
+                        executor.CancelManeuver(0);
+                    else
+                        executor.QueueManeuver(0);
+                }
+                GUI.backgroundColor = Color.white;
+            }
 
             GUILayout.EndHorizontal();
         }
@@ -706,6 +736,11 @@ namespace Galilego.UI
 
             DrawDVAxis(node, "Radial / Anti-Radial", ref node.DvRadial,
                 new Color(1.00f, 0.60f, 0.25f), index, 2);
+
+            GUILayout.Space(4);
+
+            // ═══ EXECUTION CONTROLS ═══
+            DrawExecutionControls(node, index, currentTime);
 
             GUILayout.Space(4);
 
@@ -1067,6 +1102,67 @@ namespace Galilego.UI
             var s = new GUIStyle(src);
             s.normal.textColor = color;
             return s;
+        }
+
+        // ═══════════════════════════════════════════════════════════════════════════
+        // EXECUTION CONTROLS
+        // ═══════════════════════════════════════════════════════════════════════════
+
+        private void DrawExecutionControls(ManeuverNode node, int index, double currentTime)
+        {
+            if (executor == null) return;
+
+            bool isQueued = executor.IsQueued(index);
+            double timeToExecution = node.StartTime - currentTime;
+            bool isPast = timeToExecution < 0;
+
+            GUILayout.BeginHorizontal();
+
+            // Execute button
+            Color btnColor = isQueued ? new Color(1f, 0.9f, 0.3f) : new Color(0.3f, 1f, 0.4f);
+            if (!isPast)
+            {
+                GUI.backgroundColor = btnColor;
+                string btnLabel = isQueued ? "⏸ Cancel Execution" : "▶ Execute Maneuver";
+                
+                if (GUILayout.Button(btnLabel, styleButton, GUILayout.Width(160)))
+                {
+                    if (isQueued)
+                        executor.CancelManeuver(index);
+                    else
+                        executor.QueueManeuver(index);
+                }
+                GUI.backgroundColor = Color.white;
+
+                // Immediate execution button
+                if (!isQueued && GUILayout.Button("⚡ Execute NOW", styleButton, GUILayout.Width(120)))
+                {
+                    executor.ExecuteManeuverImmediate(index);
+                }
+            }
+            else
+            {
+                GUILayout.Label("(Past maneuver)", styleLabelDim);
+            }
+
+            GUILayout.EndHorizontal();
+
+            // Status display
+            if (isQueued)
+            {
+                GUILayout.BeginHorizontal();
+                Color statusColor = timeToExecution > 60 ? new Color(0.5f, 1f, 0.5f) : 
+                                   timeToExecution > 10 ? new Color(1f, 0.9f, 0.3f) : 
+                                   new Color(1f, 0.4f, 0.3f);
+                
+                GUI.color = statusColor;
+                string statusText = timeToExecution > 0 
+                    ? $"⏱ Executing in {FormatDuration(timeToExecution)}"
+                    : "⚡ EXECUTING NOW!";
+                GUILayout.Label(statusText, styleHeader);
+                GUI.color = Color.white;
+                GUILayout.EndHorizontal();
+            }
         }
     }
 }

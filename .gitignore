@@ -80,3 +80,6 @@ crashlytics-build.properties
 *.sln
 *.slnx
 .vsconfig
+
+# OpenCode/Kiro working directory - documentation and session files
+Assets/_Project/.kiro/

@@ -25,6 +25,15 @@ namespace Galilego.Core
                 MassToStandardGravitationalParameter(anchorMass));
         }
 
+        /// <summary>
+        /// Вычисляет гравитационное ускорение от одного тела.
+        /// 
+        /// NOTE: Математика идентична AccelerationEvaluator.BodyGravity (double3 версия для Burst).
+        /// Обе реализации используют одинаковую формулу:
+        /// - MinSqrDistance = 100.0 m²
+        /// - a = (bodyPos - shipPos) * (μ / r³)
+        /// Это обеспечивает унификацию force model между runtime (Vector3d) и jobs (double3).
+        /// </summary>
         public static Vector3d CalculateAccelerationFromStandardGravitationalParameter(
             Vector3d currentPos,
             Vector3d anchorPos,

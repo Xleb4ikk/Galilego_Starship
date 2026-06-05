@@ -99,6 +99,11 @@ namespace Galilego.Universe
         [SerializeField] private double maxSolverStepSeconds = 1d;
         [SerializeField] private double metersPerUnityUnit = 100000d;
         [SerializeField] private double floatingOriginThreshold = 5000d;
+        
+        [Header("Integration")]
+        [Tooltip("Use unified DOPRI5 integrator (OrbitIntegrator) for runtime simulation. " +
+                 "When false, uses legacy RK4 integrator. Feature flag for safe rollback.")]
+        [SerializeField] private bool useUnifiedIntegrator = true;
 
         [Header("Reference Frames")]
         [SerializeField] private ReferenceFrameTarget selectedReferenceFrame = ReferenceFrameTarget.Jupiter;
@@ -151,6 +156,8 @@ namespace Galilego.Universe
         private Vector3d floatingOriginOffset = Vector3d.Zero;
         private Transform trajectoryVisualRoot;
         public Transform TrajectoryVisualRoot => trajectoryVisualRoot;
+        private Transform maneuverTrajectoryRoot;
+        public Transform ManeuverTrajectoryRoot => maneuverTrajectoryRoot;
 
         private float nextJupiterLogTime;
         private float nextShipLogTime;
@@ -168,6 +175,15 @@ namespace Galilego.Universe
         private double nextShipHistoryRecordTime;
         private const double ShipHistoryRecordInterval = 5.0;
         private const int MaxShipHistorySamples = 86400; // 5 days at 5s intervals
+        
+        // ─── Physics Snapshot Tracking (Phase 7: State Source Unification) ────
+        /// <summary>
+        /// Последний physics snapshot - состояние корабля в НАЧАЛЕ integration step.
+        /// Используется TrajectoryPredictor для гарантии, что prediction и simulation
+        /// начинаются с одного и того же integration point, устраняя initial condition divergence.
+        /// </summary>
+        private PhysicsSnapshot lastPhysicsSnapshot;
+        
         // ─── Sub-frame interpolation for high timeScale ────────────────
         private double _prevFixedSimTime;   // simTime на предыдущем FixedUpdate
         private double _lastFrameDtSim;     // frameDt последнего FixedUpdate
@@ -276,6 +292,26 @@ namespace Galilego.Universe
                 return false;
             EvaluateMoonState(moonRails[moonIndex], timeSeconds, out position, out _);
             return true;
+        }
+
+        /// <summary>
+        /// Get the radius of a moon by its rail index.
+        /// </summary>
+        public double GetMoonRadius(int moonIndex)
+        {
+            if (moonRails == null || moonIndex < 0 || moonIndex >= moonRails.Count)
+                return 0.0;
+            return moonRails[moonIndex].Radius;
+        }
+
+        /// <summary>
+        /// Get the sphere of influence radius of a moon by its rail index.
+        /// </summary>
+        public double GetMoonSOI(int moonIndex)
+        {
+            if (moonRails == null || moonIndex < 0 || moonIndex >= moonRails.Count)
+                return 0.0;
+            return moonRails[moonIndex].SphereOfInfluenceRadius;
         }
 
         private void Awake()
@@ -455,8 +491,24 @@ namespace Galilego.Universe
                             shipHistoryPointsBuffer = new Vector3[count];
                         for (int i = 0; i < count; i++)
                         {
+                            // Get reference frame position at the time of this history point
+                            double historyTime = shipHistoryTimes[startIdx + i];
+                            Vector3d framePositionAtTime = currentFramePosition;
+                            if (TryGetReferenceStateAtTime(
+                                activeFrame, historyTime,
+                                out _, out framePositionAtTime, out _,
+                                out _, out _, out _))
+                            {
+                                // Use frame position at history time
+                            }
+                            else
+                            {
+                                // Fallback to current frame position
+                                framePositionAtTime = currentFramePosition;
+                            }
+                            
                             shipHistoryPointsBuffer[i] = ToUnityOffset(
-                                shipHistoryPositions[startIdx + i] - currentFramePosition);
+                                shipHistoryPositions[startIdx + i] - framePositionAtTime);
                         }
                         shipHistoryLineRenderer.positionCount = count;
                         shipHistoryLineRenderer.SetPositions(shipHistoryPointsBuffer);
@@ -1176,7 +1228,40 @@ namespace Galilego.Universe
         private void StepSimulation(double dt)
         {
             double stepStartTime = simulationTimeSeconds;
-            IntegrationResult shipStep = PhysicsSolver.RK4(shipBody, stepStartTime, dt, EvaluateShipAcceleration);
+            
+            // ═══ PHASE 7: Record physics snapshot BEFORE integration step ═══
+            // Захватываем полное состояние корабля в НАЧАЛЕ шага интегратора.
+            // TrajectoryPredictor будет использовать этот snapshot для гарантии,
+            // что prediction и simulation начинаются с одного integration point.
+            if (shipBody != null)
+            {
+                lastPhysicsSnapshot = new PhysicsSnapshot
+                {
+                    Position = shipBody.Position,
+                    Velocity = shipBody.Velocity,
+                    Time = stepStartTime
+                };
+            }
+            
+            IntegrationResult shipStep;
+
+            if (useUnifiedIntegrator)
+            {
+                // Use unified OrbitIntegrator with DOPRI5 (adaptive error control)
+                shipStep = OrbitIntegrator.StepForward(
+                    shipBody.Position,
+                    shipBody.Velocity,
+                    stepStartTime,
+                    dt,
+                    EvaluateShipAcceleration,
+                    absoluteTolerance: 1e-6,  // 1 mm position error
+                    relativeTolerance: 1e-9); // 1 ppb relative error
+            }
+            else
+            {
+                // Legacy RK4 integrator (for safe rollback)
+                shipStep = PhysicsSolver.RK4(shipBody, stepStartTime, dt, EvaluateShipAcceleration);
+            }
 
             if (!shipStep.Position.IsFinite || !shipStep.Velocity.IsFinite)
             {
@@ -2678,6 +2763,27 @@ namespace Galilego.Universe
             return true;
         }
 
+        /// <summary>
+        /// Получить текущий reference frame state (position, velocity) для выполнения манёвров.
+        /// </summary>
+        public bool TryGetCurrentReferenceFrame(
+            out Vector3d framePosition, 
+            out Vector3d frameVelocity)
+        {
+            framePosition = Vector3d.Zero;
+            frameVelocity = Vector3d.Zero;
+            
+            ReferenceFrameTarget target = ActiveReferenceFrame;
+            
+            return TryGetReferenceStateAtTime(
+                target,
+                SimulationTimeSeconds,
+                out _,
+                out framePosition,
+                out frameVelocity,
+                out _, out _, out _);
+        }
+
         public bool TryGetReferenceStateAtTime(
             ReferenceFrameTarget target,
             double sampleTimeSeconds,
@@ -2848,7 +2954,7 @@ namespace Galilego.Universe
                 ConfigureCelestialBodyRenderers(visual);
             }
 
-            if (shipBody != null && ship != null)
+            if (shipBody != null && ship != null && ship.VisualTransform != null)
             {
                 ApplyVisualScale(ship.VisualTransform, ship.VisualRadiusMeters);
 
@@ -3348,6 +3454,19 @@ namespace Galilego.Universe
             }
             ApplyVisualPosition(shipHistoryRoot, ResolveActiveReferenceVisualPosition());
 
+            // ── Maneuver trajectory root (frame-offset parent for segment/ballistic lines) ──
+            if (maneuverTrajectoryRoot == null)
+            {
+                maneuverTrajectoryRoot = FindChildByName(trajectoryVisualRoot, "Maneuver_Trajectory");
+                if (maneuverTrajectoryRoot == null)
+                {
+                    GameObject rootObj = new GameObject("Maneuver_Trajectory");
+                    maneuverTrajectoryRoot = rootObj.transform;
+                    maneuverTrajectoryRoot.SetParent(trajectoryVisualRoot, false);
+                }
+            }
+            ApplyVisualPosition(maneuverTrajectoryRoot, ResolveActiveReferenceVisualPosition());
+
             // ── Ship marker (satellite icon, positioned at ship position) ──
             if (shipMarker == null)
             {
@@ -3459,6 +3578,9 @@ namespace Galilego.Universe
             }
 
             ApplyVisualPosition(moonOrbitRoot, currentFramePosition);
+            
+            if (maneuverTrajectoryRoot != null)
+                ApplyVisualPosition(maneuverTrajectoryRoot, currentFramePosition);
 
             int sampleCount = Math.Max(16, moonOrbitSamples);
             double historySeconds = moonOrbitHistoryDays * 86400d;
@@ -4269,5 +4391,40 @@ namespace Galilego.Universe
             if (jupiterOrbitPointBuffer.IsCreated)
                 jupiterOrbitPointBuffer.Dispose();
         }
+        
+        /// <summary>
+        /// Получить последний physics snapshot - состояние корабля в начале последнего integration step.
+        /// Используется TrajectoryPredictor для синхронизации начальных условий prediction и simulation.
+        /// </summary>
+        /// <param name="snapshot">Physics snapshot с позицией, скоростью и временем</param>
+        /// <returns>True если snapshot доступен, false если корабль не инициализирован</returns>
+        public bool TryGetLastPhysicsSnapshot(out PhysicsSnapshot snapshot)
+        {
+            if (shipBody == null)
+            {
+                snapshot = default;
+                return false;
+            }
+            
+            snapshot = lastPhysicsSnapshot;
+            return true;
+        }
+    }
+    
+    /// <summary>
+    /// Physics snapshot - полное состояние spacecraft в конкретный момент времени.
+    /// Snapshot захватывается в НАЧАЛЕ integration step (до вызова OrbitIntegrator.StepForward).
+    /// 
+    /// Цель: Гарантировать, что prediction и runtime simulation начинаются с одинакового
+    /// integration point, устраняя initial condition divergence.
+    /// 
+    /// Physics snapshot - это не просто значение времени, а полный кортеж (pos, vel, time)
+    /// после конкретного шага интегратора.
+    /// </summary>
+    public struct PhysicsSnapshot
+    {
+        public Vector3d Position;
+        public Vector3d Velocity;
+        public double Time;
     }
 }
