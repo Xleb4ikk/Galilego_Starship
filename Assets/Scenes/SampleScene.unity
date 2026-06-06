@@ -1942,6 +1942,7 @@ MonoBehaviour:
   autoRefresh: 1
   refreshIntervalSeconds: 0.15
   stepsPerBatch: 2048
+  usePredictorUnifiedIntegrator: 1
 --- !u!120 &598997629
 LineRenderer:
   serializedVersion: 3
@@ -2293,6 +2294,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::Galilego.Gameplay.FlightPlanUI
   evaluator: {fileID: 861880901}
   orbitAnalyzer: {fileID: 0}
+  executor: {fileID: 0}
   windowRect:
     serializedVersion: 2
     x: 16
@@ -2828,16 +2830,16 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::Galilego.Gameplay.ManeuverEvaluator
   universeManager: {fileID: 0}
   timeMarkerPrefab: {fileID: 0}
-  predictionStepSeconds: 5
-  maxPredictionSubstepSeconds: 0
-  maxSubstepsPerSegment: 256
-  maxTrajectoryPoints: 50000
+  predictionStepSeconds: 10
+  maxPredictionSubstepSeconds: 5
+  maxSubstepsPerSegment: 4096
+  maxTrajectoryPoints: 10000
   defaultPredictionLengthSeconds: 7200
   maxPredictionLengthSeconds: 315360000
-  maxStepsPerFrame: 256
+  maxStepsPerFrame: 10000
   forceSynchronousCalculation: 0
-  debounceTime: 0.15
-  maxPointsPerLine: 65535
+  debounceTime: 0.5
+  maxPointsPerLine: 512
   integratorRelTol: 0.00000001
   integratorAbsTol: 0.1
   integratorMinStep: 0.1
@@ -2847,6 +2849,10 @@ MonoBehaviour:
   lodNearTime: 86400
   lodMidTime: 2592000
   lodErrorTolerance: 0.009999999776482582
+  ballisticLinePixelWidth: 1.5
+  maneuverLinePixelWidth: 1.5
+  minLineWidth: 0.1
+  maxLineWidth: 0.1
   moonVisRebuildIntervalReal: 0.5
   moonPredictionSamples: 64
   moonPredictionSamplesPerOrbit: 96
@@ -5738,6 +5744,7 @@ MonoBehaviour:
   maxSolverStepSeconds: 1
   metersPerUnityUnit: 100000
   floatingOriginThreshold: 5000
+  useUnifiedIntegrator: 1
   selectedReferenceFrame: 0
   astrodynamicPlaneMapping: 0
   autoSelectSphereOfInfluence: 0

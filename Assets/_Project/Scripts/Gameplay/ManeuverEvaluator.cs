@@ -63,6 +63,54 @@ namespace Galilego.Gameplay
         [SerializeField] private double lodMidTime = 2592000.0;         // 30 дней
         [SerializeField] private double lodErrorTolerance = 0.01f;      // макс отклонение полилинии (Unity units)
 
+        [Header("Trajectory Line Width Settings")]
+        [SerializeField] 
+        [Tooltip("Target width in screen pixels for ballistic trajectory (purple line)")]
+        private float ballisticLinePixelWidth = 1.5f;
+
+        [SerializeField]
+        [Tooltip("Target width in screen pixels for maneuver segments (green dashed lines)")]
+        private float maneuverLinePixelWidth = 1.5f;
+
+        [SerializeField]
+        [Tooltip("Maximum line width as percentage of distance to camera (0.002 = 0.2%)")]
+        private float maxWidthPercentage = 0.002f;
+
+        [SerializeField]
+        [Tooltip("Distance below which line starts to fade (meters)")]
+        private float closeFadeDistance = 50f;
+
+        [SerializeField]
+        [Tooltip("Minimum alpha transparency when very close (0.15 = 15%)")]
+        private float minAlpha = 0.15f;
+
+        [SerializeField]
+        [Tooltip("Distance below which line reaches minimum alpha (meters)")]
+        private float minFadeDistance = 5f;
+
+        [Header("Smoothing Settings")]
+        [SerializeField]
+        [Tooltip("Time for smoothing width/alpha jumps (seconds). 0.2 is optimal.")]
+        private float widthSmoothTime = 0.2f;
+
+        // Smoothing variables for ballistic line
+        private float _smoothBallisticWidth = 0.01f;
+        private float _ballisticWidthVelocity = 0f;
+        private float _smoothBallisticAlpha = 1f;
+        private float _ballisticAlphaVelocity = 0f;
+
+        // Smoothing variables for maneuver segments (per-segment arrays)
+        private List<float> _smoothManeuverWidths = new List<float>();
+        private List<float> _maneuverWidthVelocities = new List<float>();
+        private List<float> _smoothManeuverAlphas = new List<float>();
+        private List<float> _maneuverAlphaVelocities = new List<float>();
+
+        // Smoothing variables for moon orbits
+        private float _smoothMoonWidth = 0.01f;
+        private float _moonWidthVelocity = 0f;
+        private float _smoothMoonAlpha = 1f;
+        private float _moonAlphaVelocity = 0f;
+
         [Header("Moon Prediction Performance")]
         [SerializeField] private float moonVisRebuildIntervalReal = 0.5f;  // реальные секунды между пересчётами лунных орбит
 
@@ -447,35 +495,48 @@ namespace Galilego.Gameplay
                 ballisticLine.gameObject.SetActive(showBallistic);
             if (showBallistic && ballisticLine != null)
             {
-                // Calculate width based on average distance from camera to line points
-                float avgDistance = 0f;
-                if (ballisticPositions != null && ballisticCount > 0)
+                // Calculate width based on perpendicular distance from camera to line segments
+                float minDistance = float.MaxValue;
+                if (ballisticPositions != null && ballisticCount > 1)
                 {
                     Transform parent = GetTrajectoryParent();
                     Vector3 camPos = Camera.main != null ? Camera.main.transform.position : Vector3.zero;
                     
-                    int sampleCount = Mathf.Min(10, ballisticCount);
+                    int sampleCount = Mathf.Min(ballisticCount - 1, 50);
                     for (int i = 0; i < sampleCount; i++)
                     {
-                        int idx = (i * ballisticCount) / sampleCount;
-                        Vector3 worldPos = parent.TransformPoint(ballisticPositions[idx]);
-                        avgDistance += Vector3.Distance(camPos, worldPos);
+                        int idx = (i * (ballisticCount - 1)) / Mathf.Max(1, sampleCount);
+                        Vector3 worldPos1 = parent.TransformPoint(ballisticPositions[idx]);
+                        Vector3 worldPos2 = parent.TransformPoint(ballisticPositions[Mathf.Min(idx + 1, ballisticCount - 1)]);
+                        
+                        Vector3 closestPoint = ClosestPointOnLineSegment(camPos, worldPos1, worldPos2);
+                        float dist = Vector3.Distance(camPos, closestPoint);
+                        
+                        if (dist < minDistance) minDistance = dist;
                     }
-                    avgDistance /= sampleCount;
                 }
                 else
                 {
-                    avgDistance = 1000f;
+                    minDistance = 1000f;
                 }
                 
-                float pixelHeight = Camera.main != null ? Camera.main.pixelHeight : 1080f;
-                float fov = Camera.main != null ? Camera.main.fieldOfView : 60f;
-                float frustumHeight = 2f * avgDistance * Mathf.Tan(fov * 0.5f * Mathf.Deg2Rad);
-                float w = frustumHeight * 2.25f / pixelHeight;
-                w = Mathf.Clamp(w, 0.01f, 0.5f);
+                // Используем универсальный метод расчета толщины и прозрачности
+                float targetWidth;
+                Color targetColor;
+                CalculateLineAppearance(minDistance, ballisticLinePixelWidth, ballisticLine.startColor, out targetWidth, out targetColor);
                 
-                ballisticLine.startWidth = w;
-                ballisticLine.endWidth = w;
+                // Сглаживаем ширину и прозрачность через SmoothDamp (FPS-независимо)
+                _smoothBallisticWidth = Mathf.SmoothDamp(_smoothBallisticWidth, targetWidth, ref _ballisticWidthVelocity, widthSmoothTime);
+                _smoothBallisticAlpha = Mathf.SmoothDamp(_smoothBallisticAlpha, targetColor.a, ref _ballisticAlphaVelocity, widthSmoothTime);
+                
+                // Применяем сглаженные значения
+                ballisticLine.startWidth = _smoothBallisticWidth;
+                ballisticLine.endWidth = _smoothBallisticWidth;
+                
+                Color finalColor = targetColor;
+                finalColor.a = _smoothBallisticAlpha;
+                ballisticLine.startColor = finalColor;
+                ballisticLine.endColor = finalColor;
                 ballisticLine.alignment = LineAlignment.View;
                 ballisticLine.numCornerVertices = 6;
                 ballisticLine.numCapVertices = 6;
@@ -502,29 +563,62 @@ namespace Galilego.Gameplay
                     bool showWidth = isDashed ? showDashed : showSolid;
                     if (showWidth)
                     {
-                        // Calculate width based on average distance from camera to line points
-                        float avgDistance = 0f;
+                        // Calculate width based on perpendicular distance from camera to line segments
+                        float minDistance = float.MaxValue;
                         Transform parent = GetTrajectoryParent();
                         Vector3 camPos = Camera.main != null ? Camera.main.transform.position : Vector3.zero;
                         
-                        int sampleCount = Mathf.Min(5, line.positionCount);
+                        int sampleCount = Mathf.Min(line.positionCount - 1, 20);
                         for (int i = 0; i < sampleCount; i++)
                         {
-                            int idx = (i * line.positionCount) / Mathf.Max(1, sampleCount);
-                            Vector3 localPos = line.GetPosition(idx);
-                            Vector3 worldPos = parent.TransformPoint(localPos);
-                            avgDistance += Vector3.Distance(camPos, worldPos);
+                            int idx = (i * (line.positionCount - 1)) / Mathf.Max(1, sampleCount);
+                            Vector3 localPos1 = line.GetPosition(idx);
+                            Vector3 localPos2 = line.GetPosition(Mathf.Min(idx + 1, line.positionCount - 1));
+                            Vector3 worldPos1 = parent.TransformPoint(localPos1);
+                            Vector3 worldPos2 = parent.TransformPoint(localPos2);
+                            
+                            Vector3 closestPoint = ClosestPointOnLineSegment(camPos, worldPos1, worldPos2);
+                            float dist = Vector3.Distance(camPos, closestPoint);
+                            
+                            if (dist < minDistance) minDistance = dist;
                         }
-                        avgDistance /= sampleCount;
                         
-                        float pixelHeight = Camera.main != null ? Camera.main.pixelHeight : 1080f;
-                        float fov = Camera.main != null ? Camera.main.fieldOfView : 60f;
-                        float frustumHeight = 2f * avgDistance * Mathf.Tan(fov * 0.5f * Mathf.Deg2Rad);
-                        float width = frustumHeight * 2.25f / pixelHeight;
-                        width = Mathf.Clamp(width, 0.01f, 0.5f);
+                        // Используем универсальный метод расчета толщины и прозрачности
+                        float targetWidth;
+                        Color targetColor;
+                        CalculateLineAppearance(minDistance, maneuverLinePixelWidth, line.startColor, out targetWidth, out targetColor);
                         
-                        line.startWidth = width;
-                        line.endWidth = width;
+                        // Убедимся, что списки сглаживания имеют достаточный размер
+                        while (_smoothManeuverWidths.Count <= li)
+                        {
+                            _smoothManeuverWidths.Add(0.01f);
+                            _maneuverWidthVelocities.Add(0f);
+                            _smoothManeuverAlphas.Add(1f);
+                            _maneuverAlphaVelocities.Add(0f);
+                        }
+                        
+                        // Сглаживаем ширину и прозрачность через SmoothDamp (FPS-независимо, для каждого сегмента)
+                        float smoothWidth = _smoothManeuverWidths[li];
+                        float widthVel = _maneuverWidthVelocities[li];
+                        float smoothAlpha = _smoothManeuverAlphas[li];
+                        float alphaVel = _maneuverAlphaVelocities[li];
+                        
+                        smoothWidth = Mathf.SmoothDamp(smoothWidth, targetWidth, ref widthVel, widthSmoothTime);
+                        smoothAlpha = Mathf.SmoothDamp(smoothAlpha, targetColor.a, ref alphaVel, widthSmoothTime);
+                        
+                        _smoothManeuverWidths[li] = smoothWidth;
+                        _maneuverWidthVelocities[li] = widthVel;
+                        _smoothManeuverAlphas[li] = smoothAlpha;
+                        _maneuverAlphaVelocities[li] = alphaVel;
+                        
+                        // Применяем сглаженные значения
+                        line.startWidth = smoothWidth;
+                        line.endWidth = smoothWidth;
+                        
+                        Color finalColor = targetColor;
+                        finalColor.a = smoothAlpha;
+                        line.startColor = finalColor;
+                        line.endColor = finalColor;
                         line.alignment = LineAlignment.View;
                         line.numCornerVertices = 6;
                         line.numCapVertices = 6;
@@ -1918,6 +2012,71 @@ namespace Galilego.Gameplay
         }
 
         /// <summary>
+        /// Вычисляет ближайшую точку на отрезке линии к заданной точке.
+        /// Используется для правильного расчёта расстояния от камеры до орбиты.
+        /// </summary>
+        private Vector3 ClosestPointOnLineSegment(Vector3 point, Vector3 lineStart, Vector3 lineEnd)
+        {
+            Vector3 line = lineEnd - lineStart;
+            float lineLength = line.magnitude;
+            
+            if (lineLength < 0.0001f)
+                return lineStart;
+            
+            line.Normalize();
+            Vector3 toPoint = point - lineStart;
+            float t = Vector3.Dot(toPoint, line);
+            t = Mathf.Clamp(t, 0, lineLength);
+            
+            return lineStart + line * t;
+        }
+
+        /// <summary>
+        /// Вычисляет физическую толщину линии и её прозрачность на основе расстояния до камеры.
+        /// Использует процентный множитель для предотвращения "огромных труб" при близком расстоянии.
+        /// </summary>
+        /// <param name="minDistance">Минимальное расстояние от камеры до линии (метры)</param>
+        /// <param name="pixelWidth">Целевая ширина линии в пикселях (screen-space)</param>
+        /// <param name="baseColor">Базовый цвет линии (RGB)</param>
+        /// <param name="width">Результирующая физическая толщина линии (метры)</param>
+        /// <param name="finalColor">Результирующий цвет с примененной прозрачностью</param>
+        private void CalculateLineAppearance(float minDistance, float pixelWidth, Color baseColor, out float width, out Color finalColor)
+        {
+            Camera cam = Camera.main;
+            if (cam == null)
+            {
+                width = 0.01f;
+                finalColor = baseColor;
+                return;
+            }
+
+            float fov = cam.fieldOfView;
+            float pixelHeight = cam.pixelHeight;
+
+            // 1. Screen-space расчет (постоянная толщина в пикселях)
+            float frustumHeight = 2f * minDistance * Mathf.Tan(fov * 0.5f * Mathf.Deg2Rad);
+            float widthScreenSpace = frustumHeight * pixelWidth / pixelHeight;
+
+            // 2. Процентный множитель (физический потолок)
+            float maxPhysicalWidth = minDistance * maxWidthPercentage;
+            
+            // 3. Итоговая ширина (берем минимум, чтобы вблизи не была огромной)
+            width = Mathf.Min(widthScreenSpace, maxPhysicalWidth);
+            width = Mathf.Max(width, 0.001f); // Микроскопический минимум, чтобы LineRenderer не сломался
+
+            // 4. Alpha Fade (плавное затухание при сближении)
+            float alpha = 1f;
+            if (minDistance < closeFadeDistance)
+            {
+                float t = Mathf.InverseLerp(minFadeDistance, closeFadeDistance, minDistance);
+                alpha = Mathf.Lerp(minAlpha, 1f, Mathf.Clamp01(t));
+            }
+
+            finalColor = baseColor;
+            finalColor.a *= alpha;
+        }
+
+        /// <summary>
         /// Пересчитывает визуализацию траектории при смене reference frame.
         /// Использует уже рассчитанные absolute coordinates, только меняет трансформацию.
         /// </summary>
@@ -2123,8 +2282,8 @@ namespace Galilego.Gameplay
                 obj.layer = ResolveTrajectoryLayer();
                 var lr = obj.AddComponent<LineRenderer>();
                 lr.useWorldSpace = false;
-                lr.startWidth = 0.15f;
-                lr.endWidth = 0.15f;
+                lr.startWidth = 0.01f;  // Минимальное значение, UpdateVisibility() обновит
+                lr.endWidth = 0.01f;
                 lr.alignment = LineAlignment.View;
                 lr.numCornerVertices = 6;
                 lr.numCapVertices = 6;
@@ -2143,8 +2302,8 @@ namespace Galilego.Gameplay
             obj.layer = ResolveTrajectoryLayer();
             var lr = obj.AddComponent<LineRenderer>();
             lr.useWorldSpace = false;
-            lr.startWidth = 0.2f;
-            lr.endWidth = 0.2f;
+            lr.startWidth = 0.01f;  // Минимальное значение, UpdateVisibility() обновит
+            lr.endWidth = 0.01f;
             lr.alignment = LineAlignment.View;
             lr.numCornerVertices = 6;
             lr.numCapVertices = 6;
@@ -2640,14 +2799,23 @@ namespace Galilego.Gameplay
                     }
                     avgDistance /= sampleCount;
                     
-                    float pixelHeight = Camera.main != null ? Camera.main.pixelHeight : 1080f;
-                    float fov = Camera.main != null ? Camera.main.fieldOfView : 60f;
-                    float frustumHeight = 2f * avgDistance * Mathf.Tan(fov * 0.5f * Mathf.Deg2Rad);
-                    float lineWidth = frustumHeight * 1.5f / pixelHeight;
-                    lineWidth = Mathf.Clamp(lineWidth, 0.01f, 0.5f);
+                    // Используем универсальный метод расчета толщины и прозрачности
+                    float targetWidth;
+                    Color targetColor;
+                    CalculateLineAppearance(avgDistance, 1.5f, cache.Line.startColor, out targetWidth, out targetColor);
                     
-                    cache.Line.startWidth = lineWidth;
-                    cache.Line.endWidth = lineWidth;
+                    // Сглаживаем ширину и прозрачность через SmoothDamp (FPS-независимо)
+                    _smoothMoonWidth = Mathf.SmoothDamp(_smoothMoonWidth, targetWidth, ref _moonWidthVelocity, widthSmoothTime);
+                    _smoothMoonAlpha = Mathf.SmoothDamp(_smoothMoonAlpha, targetColor.a, ref _moonAlphaVelocity, widthSmoothTime);
+                    
+                    // Применяем сглаженные значения
+                    cache.Line.startWidth = _smoothMoonWidth;
+                    cache.Line.endWidth = _smoothMoonWidth;
+                    
+                    Color finalColor = targetColor;
+                    finalColor.a = _smoothMoonAlpha;
+                    cache.Line.startColor = finalColor;
+                    cache.Line.endColor = finalColor;
                     if (cache.Line.gameObject.activeSelf != show)
                         cache.Line.gameObject.SetActive(show);
                 }
