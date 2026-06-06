@@ -83,3 +83,6 @@ crashlytics-build.properties
 
 # OpenCode/Kiro working directory - documentation and session files
 Assets/_Project/.kiro/
+
+# Codex temporary files
+Assets/.codex_tmp/
