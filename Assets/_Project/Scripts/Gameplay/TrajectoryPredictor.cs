@@ -25,6 +25,26 @@ namespace Galilego.Gameplay
         [SerializeField] private float refreshIntervalSeconds = 0.15f;
         [SerializeField] private int stepsPerBatch = 128;
 
+        [Header("Integration Settings")]
+        /// <summary>
+        /// Feature flag to enable unified OrbitIntegrator (DOPRI5) for trajectory prediction.
+        /// When false, uses original RK4 integration method.
+        /// 
+        /// Purpose: Allows safe rollback if the unified integrator causes issues.
+        /// 
+        /// Rollback Procedure:
+        /// 1. Set this flag to false in the Unity Inspector or via code
+        /// 2. The trajectory predictor will revert to using PhysicsSolver.RK4
+        /// 3. Restart the simulation or force refresh the trajectory prediction
+        /// 
+        /// Note: This flag is part of Phase 4 of the trajectory prediction mismatch bugfix.
+        /// Once the migration is complete and validated, this flag will be removed and
+        /// the unified integrator will be the only option.
+        /// </summary>
+        [SerializeField] 
+        [Tooltip("Enable unified OrbitIntegrator (DOPRI5) for trajectory prediction. Disable to rollback to original RK4 integration.")]
+        private bool usePredictorUnifiedIntegrator = true;
+
         private Coroutine rebuildCoroutine;
         private Vector3[] cachedLocalPoints = Array.Empty<Vector3>();
         private bool refreshQueued;
@@ -225,12 +245,30 @@ namespace Galilego.Gameplay
 
                     for (int internalStepIndex = 0; internalStepIndex < internalStepCount; internalStepIndex++)
                     {
-                        IntegrationResult stepResult = PhysicsSolver.RK4(
-                            predictedPosition,
-                            predictedVelocity,
-                            predictedTimeSeconds,
-                            internalStepSeconds,
-                            universeManager.EvaluateShipAccelerationAt);
+                        IntegrationResult stepResult;
+                        
+                        if (usePredictorUnifiedIntegrator)
+                        {
+                            // Use unified OrbitIntegrator with DOPRI5 (Phase 4 migration)
+                            stepResult = OrbitIntegrator.StepForward(
+                                predictedPosition,
+                                predictedVelocity,
+                                predictedTimeSeconds,
+                                internalStepSeconds,
+                                universeManager.EvaluateShipAccelerationAt,
+                                absoluteTolerance: 1e-6,  // 1 mm position error
+                                relativeTolerance: 1e-9); // 1 ppb relative error
+                        }
+                        else
+                        {
+                            // Original RK4 integration (for rollback)
+                            stepResult = PhysicsSolver.RK4(
+                                predictedPosition,
+                                predictedVelocity,
+                                predictedTimeSeconds,
+                                internalStepSeconds,
+                                universeManager.EvaluateShipAccelerationAt);
+                        }
 
                         predictedPosition = stepResult.Position;
                         predictedVelocity = stepResult.Velocity;
@@ -260,6 +298,15 @@ namespace Galilego.Gameplay
             rebuildCoroutine = null;
         }
 
+        /// <summary>
+        /// Получить начальное состояние для trajectory prediction.
+        /// 
+        /// PHASE 7: State Source Unification
+        /// Использует UniverseManager.TryGetLastPhysicsSnapshot для гарантии, что prediction
+        /// и simulation начинаются с одного и того же integration point.
+        /// Это устраняет initial condition divergence, когда prediction refresh происходит
+        /// mid-step во время интеграции.
+        /// </summary>
         private bool TryGetPredictionState(out Vector3d startPosition, out Vector3d startVelocity, out double startTimeSeconds)
         {
             startPosition = Vector3d.Zero;
@@ -271,6 +318,17 @@ namespace Galilego.Gameplay
                 return false;
             }
 
+            // Попытка получить physics snapshot (состояние в начале последнего integration step)
+            if (universeManager.TryGetLastPhysicsSnapshot(out PhysicsSnapshot snapshot))
+            {
+                startPosition = snapshot.Position;
+                startVelocity = snapshot.Velocity;
+                startTimeSeconds = snapshot.Time;
+                return true;
+            }
+            
+            // Fallback: использовать текущее состояние (если snapshot недоступен)
+            // Это может происходить при первом запуске до первого integration step
             CelestialBody shipBody = universeManager.ShipBody;
             startPosition = shipBody.Position;
             startVelocity = shipBody.Velocity;
