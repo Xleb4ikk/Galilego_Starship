@@ -771,10 +771,25 @@ namespace Galilego.Gameplay
             _ephemerisRevision++;
         }
 
-        private void HandleActiveReferenceFrameChanged(ReferenceFrameTarget _)
+        private void HandleActiveReferenceFrameChanged(ReferenceFrameTarget newFrame)
         {
-            InvalidateCache();
-            MarkAsDirty();
+            // Траектория всегда рассчитывается относительно Jupiter (lockedReferenceFrame = Jupiter)
+            // Но визуализация должна показываться в текущем ActiveReferenceFrame
+            
+            // Пересчитать визуализацию существующих точек с новым frame
+            if (fullTrajectoryPoints.Count > 0)
+            {
+                RetransformTrajectoryForNewFrame();
+            }
+            
+            if (cachedBallisticPoints.Count > 0)
+            {
+                RetransformBallisticForNewFrame();
+            }
+            
+            // Обновить cachedReferenceFrame чтобы MatchesCachedInput не триггерил пересчёт
+            // Траектория в абсолютных координатах не меняется при смене frame, только визуализация
+            cachedReferenceFrame = newFrame;
         }
 
         private bool MatchesCachedInput()
@@ -890,7 +905,9 @@ namespace Galilego.Gameplay
                 cachedBallisticTimes.Clear();
             }
 
-            lockedReferenceFrame = universeManager.ActiveReferenceFrame;
+            // Всегда планировать траектории относительно Jupiter (главное тело)
+            // ActiveReferenceFrame используется только для визуализации
+            lockedReferenceFrame = ReferenceFrameTarget.Jupiter;
 
             ScheduleJobs();
 
@@ -1888,14 +1905,88 @@ namespace Galilego.Gameplay
 
         private bool TryUpdateFrameState(ref Vector3d framePos, ref Vector3d frameVel, double time)
         {
+            // Для визуализации всегда использовать ТЕКУЩИЙ ActiveReferenceFrame,
+            // независимо от того, в каком frame планировалась траектория (lockedReferenceFrame)
             if (universeManager.TryGetReferenceStateAtTime(
-                lockedReferenceFrame, time,
+                universeManager.ActiveReferenceFrame, time,
                 out _, out framePos, out frameVel,
                 out _, out _, out _))
             {
                 return true;
             }
             return false;
+        }
+
+        /// <summary>
+        /// Пересчитывает визуализацию траектории при смене reference frame.
+        /// Использует уже рассчитанные absolute coordinates, только меняет трансформацию.
+        /// </summary>
+        private void RetransformTrajectoryForNewFrame()
+        {
+            int count = fullTrajectoryPoints.Count;
+            if (count == 0) return;
+            
+            InitializeBackBuffer(count);
+            
+            Vector3d framePos = Vector3d.Zero;
+            Vector3d frameVel = Vector3d.Zero;
+            
+            // Используем ТЕКУЩИЙ ActiveReferenceFrame для визуализации, а не lockedReferenceFrame
+            ReferenceFrameTarget visualFrame = universeManager.ActiveReferenceFrame;
+            
+            for (int i = 0; i < count && i < backBufferPoints.Length; i++)
+            {
+                double ptTime = fullTrajectoryTimes[i];
+                Vector3d absPos = fullTrajectoryPoints[i];
+                
+                // Получить позицию frame для визуализации
+                universeManager.TryGetReferenceStateAtTime(
+                    visualFrame, ptTime,
+                    out _, out framePos, out frameVel,
+                    out _, out _, out _);
+                
+                Vector3d relPos = absPos - framePos;
+                
+                backBufferPoints[i] = universeManager.ToUnityOffset(relPos);
+                backBufferTimes[i] = ptTime;
+                backBufferIsDashed[i] = i < fullTrajectoryIsDashed.Count && fullTrajectoryIsDashed[i];
+            }
+            backBufferCount = count;
+            
+            CompleteBackBuffer(backBufferCount);
+        }
+
+        /// <summary>
+        /// Пересчитывает визуализацию баллистической траектории при смене reference frame.
+        /// </summary>
+        private void RetransformBallisticForNewFrame()
+        {
+            int bCount = cachedBallisticPoints.Count;
+            if (bCount == 0) return;
+            
+            ballisticPositions = new Vector3[bCount];
+            ballisticTimesData = new double[bCount];
+            
+            Vector3d framePos = Vector3d.Zero;
+            Vector3d frameVel = Vector3d.Zero;
+            
+            // Используем ТЕКУЩИЙ ActiveReferenceFrame для визуализации, а не lockedReferenceFrame
+            ReferenceFrameTarget visualFrame = universeManager.ActiveReferenceFrame;
+            
+            for (int i = 0; i < bCount; i++)
+            {
+                // Получить позицию frame для визуализации
+                universeManager.TryGetReferenceStateAtTime(
+                    visualFrame, cachedBallisticTimes[i],
+                    out _, out framePos, out frameVel,
+                    out _, out _, out _);
+                
+                Vector3d relPos = cachedBallisticPoints[i] - framePos;
+                ballisticPositions[i] = universeManager.ToUnityOffset(relPos);
+                ballisticTimesData[i] = cachedBallisticTimes[i];
+            }
+            ballisticCount = bCount;
+            UpdateBallisticLine();
         }
 
         private void InitializeBackBuffer(int capacity)
