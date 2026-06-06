@@ -2,6 +2,7 @@ using Unity.Burst;
 using Unity.Collections;
 using Unity.Jobs;
 using Unity.Mathematics;
+using Galilego.Core;
 
 namespace Galilego.Simulation
 {
@@ -322,27 +323,28 @@ namespace Galilego.Simulation
             out double errPos, out double errVel,
             double3 fsalAccel, out double3 lastAccel)
         {
-            // Dormand–Prince 5(4) coefficients (Butcher tableau)
-            const double a21 = 1.0 / 5.0;
-            const double a31 = 3.0 / 40.0;
-            const double a32 = 9.0 / 40.0;
-            const double a41 = 44.0 / 45.0;
-            const double a42 = -56.0 / 15.0;
-            const double a43 = 32.0 / 9.0;
-            const double a51 = 19372.0 / 6561.0;
-            const double a52 = -25360.0 / 2187.0;
-            const double a53 = 64448.0 / 6561.0;
-            const double a54 = -212.0 / 729.0;
-            const double a61 = 9017.0 / 3168.0;
-            const double a62 = -355.0 / 33.0;
-            const double a63 = 46732.0 / 5247.0;
-            const double a64 = 49.0 / 176.0;
-            const double a65 = -5103.0 / 18656.0;
-            const double a71 = 35.0 / 384.0;
-            const double a73 = 500.0 / 1113.0;
-            const double a74 = 125.0 / 192.0;
-            const double a75 = -2187.0 / 6784.0;
-            const double a76 = 11.0 / 84.0;
+            // Dormand–Prince 5(4) coefficients - using shared constants
+            // See DOPRI5Coefficients.cs for single source of truth
+            const double a21 = DOPRI5Coefficients.a21;
+            const double a31 = DOPRI5Coefficients.a31;
+            const double a32 = DOPRI5Coefficients.a32;
+            const double a41 = DOPRI5Coefficients.a41;
+            const double a42 = DOPRI5Coefficients.a42;
+            const double a43 = DOPRI5Coefficients.a43;
+            const double a51 = DOPRI5Coefficients.a51;
+            const double a52 = DOPRI5Coefficients.a52;
+            const double a53 = DOPRI5Coefficients.a53;
+            const double a54 = DOPRI5Coefficients.a54;
+            const double a61 = DOPRI5Coefficients.a61;
+            const double a62 = DOPRI5Coefficients.a62;
+            const double a63 = DOPRI5Coefficients.a63;
+            const double a64 = DOPRI5Coefficients.a64;
+            const double a65 = DOPRI5Coefficients.a65;
+            const double a71 = DOPRI5Coefficients.a71;
+            const double a73 = DOPRI5Coefficients.a73;
+            const double a74 = DOPRI5Coefficients.a74;
+            const double a75 = DOPRI5Coefficients.a75;
+            const double a76 = DOPRI5Coefficients.a76;
 
             // Stage evaluations with time-dependent gravity
             // c-values: 0, 1/5, 3/10, 4/5, 8/9, 1, 1
@@ -351,10 +353,22 @@ namespace Galilego.Simulation
             int localHint = hintEphemIdx;
             double3 k1v = fsalAccel;
             double3 k1p = vel;
+            
+            // DEBUG: Log first step
+            if (time == 0.0)
+            {
+                UnityEngine.Debug.Log($"[FTJ_DEBUG] DoPri5Step called: pos=({pos.x:F3}, {pos.y:F3}, {pos.z:F3}), vel=({vel.x:F3}, {vel.y:F3}, {vel.z:F3}), dt={dt:F3}");
+                UnityEngine.Debug.Log($"[FTJ_DEBUG] k1p=({k1p.x:F3}, {k1p.y:F3}, {k1p.z:F3}), k1v=({k1v.x:F3}, {k1v.y:F3}, {k1v.z:F3})");
+            }
 
             double3 pos2 = pos + k1p * (dt * a21);
             double3 vel2 = vel + k1v * (dt * a21);
             double3 a2 = EvaluateAccelerationAt(pos2, time + dt * (1.0/5.0), ref localHint);
+            
+            if (time == 0.0)
+            {
+                UnityEngine.Debug.Log($"[FTJ_DEBUG] Stage 2: pos2=({pos2.x:F3}, {pos2.y:F3}, {pos2.z:F3}), vel2=({vel2.x:F3}, {vel2.y:F3}, {vel2.z:F3})");
+            }
 
             double3 pos3 = pos + (k1p * (dt * a31) + vel2 * (dt * a32));
             double3 vel3 = vel + (k1v * (dt * a31) + a2 * (dt * a32));
@@ -376,23 +390,28 @@ namespace Galilego.Simulation
             double3 vel7 = vel + (k1v * (dt * a71) + a3 * (dt * a73) + a4 * (dt * a74) + a5 * (dt * a75) + a6 * (dt * a76));
             double3 a7 = EvaluateAccelerationAt(pos7, time + dt, ref localHint);
 
-            // 5th order weights
-            const double b1 = 35.0 / 384.0;
-            const double b3 = 500.0 / 1113.0;
-            const double b4 = 125.0 / 192.0;
-            const double b5 = -2187.0 / 6784.0;
-            const double b6 = 11.0 / 84.0;
+            // 5th order weights - using shared constants
+            const double b1 = DOPRI5Coefficients.b1;
+            const double b3 = DOPRI5Coefficients.b3;
+            const double b4 = DOPRI5Coefficients.b4;
+            const double b5 = DOPRI5Coefficients.b5;
+            const double b6 = DOPRI5Coefficients.b6;
 
             double3 fifthPos = pos + (k1p * (dt * b1) + vel3 * (dt * b3) + vel4 * (dt * b4) + vel5 * (dt * b5) + vel6 * (dt * b6));
             double3 fifthVel = vel + (k1v * (dt * b1) + a3 * (dt * b3) + a4 * (dt * b4) + a5 * (dt * b5) + a6 * (dt * b6));
+            
+            if (time == 0.0)
+            {
+                UnityEngine.Debug.Log($"[FTJ_DEBUG] Result: fifthPos=({fifthPos.x:F3}, {fifthPos.y:F3}, {fifthPos.z:F3}), fifthVel=({fifthVel.x:F3}, {fifthVel.y:F3}, {fifthVel.z:F3})");
+            }
 
-            // 4th order weights (for error estimation)
-            const double bs1 = 5179.0 / 57600.0;
-            const double bs3 = 7571.0 / 16695.0;
-            const double bs4 = 393.0 / 640.0;
-            const double bs5 = -92097.0 / 339200.0;
-            const double bs6 = 187.0 / 2100.0;
-            const double bs7 = 1.0 / 40.0;
+            // 4th order weights (for error estimation) - using shared constants
+            const double bs1 = DOPRI5Coefficients.bStar1;
+            const double bs3 = DOPRI5Coefficients.bStar3;
+            const double bs4 = DOPRI5Coefficients.bStar4;
+            const double bs5 = DOPRI5Coefficients.bStar5;
+            const double bs6 = DOPRI5Coefficients.bStar6;
+            const double bs7 = DOPRI5Coefficients.bStar7;
 
             double3 fourthPos = pos + (k1p * (dt * bs1) + vel3 * (dt * bs3) + vel4 * (dt * bs4) + vel5 * (dt * bs5) + vel6 * (dt * bs6) + vel7 * (dt * bs7));
             double3 fourthVel = vel + (k1v * (dt * bs1) + a3 * (dt * bs3) + a4 * (dt * bs4) + a5 * (dt * bs5) + a6 * (dt * bs6) + a7 * (dt * bs7));
@@ -413,6 +432,13 @@ namespace Galilego.Simulation
             double targetTime, ref SubstepData data)
         {
             double dt = targetTime - currentTime;
+
+            // If both JupiterRadius and MoonRadius are 0, event caps are disabled
+            // Return dt unchanged (no geometric capping)
+            if (JupiterRadius <= 0.0 && MoonRadius <= 0.0)
+            {
+                return dt;
+            }
 
             double minDist = data.MinDistToAnyBody;
             double speed = math.length(vel);
@@ -521,7 +547,7 @@ namespace Galilego.Simulation
 
             if (JupiterSGP > 0.0)
             {
-                total += BodyGravity(pos, JupiterPosition, JupiterSGP);
+                total += AccelerationEvaluator.BodyGravity(pos, JupiterPosition, JupiterSGP);
             }
 
             if (MoonCount > 0 && MoonEphemeris.Length > 0 && EphemerisTimes.Length > 0)
@@ -541,7 +567,7 @@ namespace Galilego.Simulation
                 int b0 = idx * MoonCount;
                 int b1 = math.min(idx + 1, timesLen - 1) * MoonCount;
 
-                int mCount = math.min(MoonCount, 4);
+                int mCount = MoonCount; // FIXED: Use all moons, not just first 4
                 for (int m = 0; m < mCount; m++)
                 {
                     if (ProfileCounters.IsCreated) ProfileCounters[PC_HERMITE]++;
@@ -549,7 +575,9 @@ namespace Galilego.Simulation
                         MoonEphemeris[b0 + m].Position, MoonVelocities[b0 + m],
                         MoonEphemeris[b1 + m].Position, MoonVelocities[b1 + m],
                         t0, t1, t);
-                    total += BodyGravity(pos, moonPos, MoonEphemeris[b0 + m].StandardGravitationalParameter);
+                    double moonMu = MoonEphemeris[b0 + m].StandardGravitationalParameter;
+                    double3 moonAccel = AccelerationEvaluator.BodyGravity(pos, moonPos, moonMu);
+                    total += moonAccel;
                 }
             }
 
@@ -640,18 +668,6 @@ namespace Galilego.Simulation
             return data;
         }
 
-        private static double3 BodyGravity(double3 shipPos, double3 bodyPos, double sgp)
-        {
-            if (sgp == 0.0) return double3.zero;
-            double3 offset = bodyPos - shipPos;
-            double sqrDist = math.lengthsq(offset);
-            if (sqrDist <= 0.0 || sqrDist < 100.0) return double3.zero;
-
-            double invDist = 1.0 / math.sqrt(sqrDist);
-            double invDistCubed = invDist / sqrDist;
-            return offset * (sgp * invDistCubed);
-        }
-
         private void ResolveReferenceFrameState(double time, out double3 framePos, out double3 frameVel)
         {
             if (ReferenceFrameIndex <= 0 || MoonCount == 0 || MoonEphemeris.Length == 0 || EphemerisTimes.Length == 0)
@@ -680,7 +696,14 @@ namespace Galilego.Simulation
                 EphemerisTimes[math.min(idx + 1, timesLen - 1)],
                 time);
 
-            frameVel = MoonVelocities[b0];
+            frameVel = AccelerationEvaluator.HermiteInterpolateVelocity(
+                MoonEphemeris[b0].Position,
+                MoonVelocities[b0],
+                MoonEphemeris[b1].Position,
+                MoonVelocities[b1],
+                EphemerisTimes[idx],
+                EphemerisTimes[math.min(idx + 1, timesLen - 1)],
+                time);
         }
 
         private static double3 CalculateWorldDeltaV(double3 pos, double3 vel, ManeuverNodeData node)

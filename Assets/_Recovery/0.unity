@@ -2830,16 +2830,16 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::Galilego.Gameplay.ManeuverEvaluator
   universeManager: {fileID: 0}
   timeMarkerPrefab: {fileID: 0}
-  predictionStepSeconds: 10
-  maxPredictionSubstepSeconds: 5
-  maxSubstepsPerSegment: 4096
-  maxTrajectoryPoints: 10000
+  predictionStepSeconds: 5
+  maxPredictionSubstepSeconds: 0
+  maxSubstepsPerSegment: 256
+  maxTrajectoryPoints: 50000
   defaultPredictionLengthSeconds: 7200
   maxPredictionLengthSeconds: 315360000
-  maxStepsPerFrame: 10000
+  maxStepsPerFrame: 256
   forceSynchronousCalculation: 0
-  debounceTime: 0.5
-  maxPointsPerLine: 512
+  debounceTime: 0.15
+  maxPointsPerLine: 65535
   integratorRelTol: 0.00000001
   integratorAbsTol: 0.1
   integratorMinStep: 0.1
@@ -2849,10 +2849,6 @@ MonoBehaviour:
   lodNearTime: 86400
   lodMidTime: 2592000
   lodErrorTolerance: 0.009999999776482582
-  ballisticLinePixelWidth: 1.5
-  maneuverLinePixelWidth: 1.5
-  minLineWidth: 0.1
-  maxLineWidth: 0.1
   moonVisRebuildIntervalReal: 0.5
   moonPredictionSamples: 64
   moonPredictionSamplesPerOrbit: 96
