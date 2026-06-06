@@ -1,6 +1,5 @@
 {
   "dependencies": {
-    "com.unity.ai.assistant": "2.7.0-pre.2",
     "com.unity.ai.navigation": "2.0.12",
     "com.unity.burst": "1.8.29",
     "com.unity.cloud.gltfast": "6.18.0",
