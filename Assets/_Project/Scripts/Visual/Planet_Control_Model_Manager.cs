@@ -13,8 +13,10 @@ public class Planet_Control_Model_Manager : MonoBehaviour
 
     void Start()
     {
-        quality = PlayerPrefs.GetInt("TextureQuality");
-        SetModelQuality(quality);
+        if (SaveManager.Settings == null)
+            Debug.LogWarning("Настройки будут работать только после того если игру запустить через меню");
+        else
+            SetModelQuality(SaveManager.Settings.TextureQuality);
     }
 
     public void SetModelQuality(int quality)
