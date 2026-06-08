@@ -1,55 +1,57 @@
 using UnityEngine;
 
-public class SettingsController : MonoBehaviour
+public class SaveSettingsControler : MonoBehaviour
 {
     public void SetResolution(int Value)
     {
-        PlayerPrefs.SetInt("Resolution", Value);
+        //PlayerPrefs.SetInt("Resolution", Value);
     }
 
     public void SetFrameLimit(int Value)
     {
-        PlayerPrefs.SetInt("FrameLimit", Value);
+        SaveManager.Settings.FrameLimit = Value;
     }
 
     public void SetTexureQuality(int Value)
     {
-        PlayerPrefs.SetInt("TextureQuality", Value);
+        SaveManager.Settings.TextureQuality = Value;
     }
 
     public void SetShadowQuality(int Value)
     {
-        PlayerPrefs.SetInt("ShadowQuality", Value);
+        SaveManager.Settings.ShadowQuality = Value;
     }
 
     public void SetEffectsQuality(int Value)
     {
-        PlayerPrefs.SetInt("EffectsQuality", Value);
+        SaveManager.Settings.EffectsQuality = Value;
     }
 
     public void SetAntiAliasing(int Value)
     {
-        PlayerPrefs.SetInt("AntuAliasing", Value);
+        SaveManager.Settings.AntiAliasing = Value;
     }
 
     public void SetMasterVolume(float Value)
     {
-        PlayerPrefs.SetFloat("MasterVolume", Value);
+        Debug.Log("Settings = " + SaveManager.Settings);
+        SaveManager.Settings.MasterVolume = Value;
     }
 
     public void SetMusicVolume(float Value)
     {
-        PlayerPrefs.SetFloat("MusicVolume", Value);
+        SaveManager.Settings.MusicVolume = Value;
     }
 
     public void SetSFXVolume(float Value)
     {
-        PlayerPrefs.SetFloat("SFXVolume", Value);
+        SaveManager.Settings.SFXVolume = Value;
     }
 
     public void SavePlayerPrefs()
     {
-        PlayerPrefs.Save();
+        SaveManager.Save();
+        //PlayerPrefs.Save();
     }
 
     public void DeleteAllPlayerPrefs()

@@ -9,7 +9,7 @@ EditorBuildSettings:
     path: Assets/Scenes/Main_Menu.unity
     guid: 2f30a851b70b79343aa331f558988010
   - enabled: 1
-    path: Assets/Scenes/SampleScene.unity
+    path: Assets/Scenes/JupiterMain.unity
     guid: 4053b717609da004cad8fe66ba9fc1f5
   m_configObjects:
     com.unity.input.settings.actions: {fileID: -944628639613478452, guid: 052faaac586de48259a63d0c4782560b, type: 3}

@@ -26,7 +26,7 @@ RenderSettings:
   m_AmbientIntensity: 1
   m_AmbientMode: 0
   m_SubtractiveShadowColor: {r: 0.42, g: 0.478, b: 0.627, a: 1}
-  m_SkyboxMaterial: {fileID: 10304, guid: 0000000000000000f000000000000000, type: 0}
+  m_SkyboxMaterial: {fileID: 2100000, guid: 860a66ca4259b384f9ec01b687f71c3c, type: 2}
   m_HaloStrength: 0.5
   m_FlareStrength: 1
   m_FlareFadeSpeed: 3
@@ -2851,8 +2851,11 @@ MonoBehaviour:
   lodErrorTolerance: 0.009999999776482582
   ballisticLinePixelWidth: 1.5
   maneuverLinePixelWidth: 1.5
-  minLineWidth: 0.1
-  maxLineWidth: 0.1
+  maxWidthPercentage: 0.002
+  closeFadeDistance: 50
+  minAlpha: 0.15
+  minFadeDistance: 5
+  widthSmoothTime: 0.2
   moonVisRebuildIntervalReal: 0.5
   moonPredictionSamples: 64
   moonPredictionSamplesPerOrbit: 96
@@ -3116,7 +3119,8 @@ PrefabInstance:
       propertyPath: m_Name
       value: Jupiter_Visual
       objectReference: {fileID: 0}
-    m_RemovedComponents: []
+    m_RemovedComponents:
+    - {fileID: 1004330475224291559, guid: 6484ebd5c0fc81b43a6610458f4615d9, type: 3}
     m_RemovedGameObjects: []
     m_AddedGameObjects: []
     m_AddedComponents: []

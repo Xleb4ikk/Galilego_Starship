@@ -13,20 +13,8 @@ public class Planet_Control_Model_Manager : MonoBehaviour
 
     void Start()
     {
-        
-    }
-
-    private void Update()
-    {
-        if (Keyboard.current[Key.Space].wasPressedThisFrame)
-        {   
-            if (quality == 3)
-            {
-                quality = 0;
-            }
-            SetModelQuality(quality);
-            quality++;
-        }
+        quality = PlayerPrefs.GetInt("TextureQuality");
+        SetModelQuality(quality);
     }
 
     public void SetModelQuality(int quality)

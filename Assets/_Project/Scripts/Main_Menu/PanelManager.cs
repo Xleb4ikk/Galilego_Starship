@@ -5,14 +5,12 @@ public class PanelManager : MonoBehaviour
 {
     public static PanelManager Instance;
 
-    [SerializeField]
-    private Transform Panel;
+    [SerializeField] private Transform Panel;
 
-    [SerializeField]
-    private float Move = 0f;
+    [SerializeField] private float Move = 0f;
+    [SerializeField] private float CloseMove = 0f;
 
-    [SerializeField]
-    private float Time = 0f;
+    [SerializeField] private float Time = 0f;
 
     private void Awake()
     {
@@ -41,9 +39,10 @@ public class PanelManager : MonoBehaviour
             .OnComplete(() => DebugManager.Log("Открытие завершено"));
     }
 
-    // Update is called once per frame
-    void Update()
+    public void CloseSettingPanel()
     {
-        
+        Panel.DOMoveX(CloseMove, Time)
+            .SetEase(Ease.InOutQuad)
+            .OnComplete(() => DebugManager.Log("Закрытие завершено"));
     }
 }

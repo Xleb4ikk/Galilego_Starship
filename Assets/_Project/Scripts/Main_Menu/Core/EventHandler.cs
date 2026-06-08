@@ -3,6 +3,7 @@ using TMPro;
 using UnityEngine;
 using UnityEngine.EventSystems;
 using UnityEngine.UI;
+using static UnityEngine.Rendering.DebugUI;
 
 public class EventHandler : MonoBehaviour, IPointerEnterHandler,
     IPointerExitHandler,
@@ -14,55 +15,67 @@ public class EventHandler : MonoBehaviour, IPointerEnterHandler,
     public Action<EventHandler, int> OnDropdownValueChanged;
     public Action<EventHandler, float> OnSliderValueChanged;
 
-    private void Awake()
+    private TMP_Dropdown Dropdown;
+    private Slider Slider;
+    private UnityEngine.UI.Button button;
+
+
+    private void OnEnable()
     {
-        var dropdown = GetComponent<TMP_Dropdown>();
-        if (dropdown != null)
-        {
-            dropdown.onValueChanged.AddListener(DropdownChanged);
-        }
+        Dropdown = GetComponent<TMP_Dropdown>();
+        Slider = GetComponent<Slider>();
+        button = GetComponent<UnityEngine.UI.Button>();
 
-        var legacyDropdown = GetComponent<Dropdown>();
-        if (legacyDropdown != null)
-        {
-            legacyDropdown.onValueChanged.AddListener(DropdownChanged);
-        }
+        Subscribe();
+    }
 
-        var slider = GetComponent<Slider>();
-        if (slider != null)
-        {
-            Debug.Log("Slider found: " + slider);
-            slider.onValueChanged.AddListener(OnSliderChanged);
-        }
+    private void OnDisable()
+    {
+        Unsubscribe();
+    }
+
+    private void Subscribe()
+    {
+        if (Dropdown == null && Slider == null && button == null)
+            Debug.LogError($"{gameObject.name}: компонент не поддерживается");
+
+        if (Dropdown)
+            Dropdown.onValueChanged.AddListener(DropdownChanged);
+
+        if (Slider)
+            Slider.onValueChanged.AddListener(OnSliderChanged);
+    }
+
+    private void Unsubscribe()
+    {
+        if (Dropdown)
+            Dropdown.onValueChanged.RemoveListener(DropdownChanged);
+
+        if (Slider)
+            Slider.onValueChanged.RemoveListener(OnSliderChanged);
     }
 
     void Start()
     {
+#if UNITY_EDITOR
         DebugManager.Log($"Start EventHandler: {this}");
+#endif
     }
 
     public void OnPointerEnter(PointerEventData eventData)
-    {
-        OnHoverEnter?.Invoke(this);
-    }
+        => OnHoverEnter?.Invoke(this);
 
     public void OnPointerExit(PointerEventData eventData)
-    {
-        OnHoverExit?.Invoke(this);
-    }
+        => OnHoverExit?.Invoke(this);
 
     public void OnPointerClick(PointerEventData eventData)
-    {
-        OnClick?.Invoke(this);
-    }
+        => OnClick?.Invoke(this);
 
     private void DropdownChanged(int value)
-    {
+    { 
         OnDropdownValueChanged?.Invoke(this, value);
-    }
+    } 
 
-    private void OnSliderChanged(float value)
-    {
-        OnSliderValueChanged?.Invoke(this, value);
-    }
+    private void OnSliderChanged(float value) => OnSliderValueChanged?.Invoke(this, value);
+
 }
